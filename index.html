@@ -644,10 +644,12 @@
             const latestScore = useRef(score);
             const latestStatus = useRef(status);
             const latestWinner = useRef(winner);
+            const latestMenuState = useRef(menuState);
 
             useEffect(() => { latestScore.current = score; }, [score]);
             useEffect(() => { latestStatus.current = status; }, [status]);
             useEffect(() => { latestWinner.current = winner; }, [winner]);
+            useEffect(() => { latestMenuState.current = menuState; }, [menuState]);
 
             const [introText, setIntroText] = useState("");
             const FULL_INTRO_TEXT = "CIRWILIUS";
@@ -1053,7 +1055,7 @@
 
                 conn.on('data', (data) => {
                     if (data.type === 'REJECTED') {
-                        if (menuState === 'QUICK_PLAYING') {
+                        if (latestMenuState.current === 'QUICK_PLAYING') {
                             if (quickPlayPeerRef.current) quickPlayPeerRef.current.destroy();
                             searchSlot(quickPlaySlotRef.current + 1);
                         } else {
@@ -1114,11 +1116,23 @@
                 });
             };
 
+            const peerConfig = {
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun3.l.google.com:19302' },
+                        { urls: 'stun:stun4.l.google.com:19302' }
+                    ]
+                }
+            };
+
             const hostOnlineGame = () => {
                 playUiSound();
                 setMenuState('HOSTING');
                 setConnectionStatus('Creating peer...');
-                const peer = new Peer();
+                const peer = new Peer(peerConfig);
                 peerRef.current = peer;
                 
                 peer.on('open', (id) => {
@@ -1127,7 +1141,7 @@
                 });
 
                 peer.on('connection', (conn) => {
-                    if (status !== 'MENU' || menuState !== 'HOSTING') {
+                    if (latestStatus.current !== 'MENU' || latestMenuState.current !== 'HOSTING') {
                         const reject = () => {
                             conn.send({ type: 'REJECTED' });
                             setTimeout(() => conn.close(), 500);
@@ -1142,7 +1156,7 @@
                 });
 
                 peer.on('error', (err) => {
-                    setConnectionError('Error: ' + err.type);
+                    setConnectionError('Error: ' + (err.type || err.message || 'Unknown error'));
                 });
             };
 
@@ -1150,7 +1164,7 @@
                 playUiSound();
                 if (!joinId) return;
                 setConnectionStatus('Connecting...');
-                const peer = new Peer();
+                const peer = new Peer(peerConfig);
                 peerRef.current = peer;
                 
                 peer.on('open', () => {
@@ -1160,7 +1174,7 @@
                 });
 
                 peer.on('error', (err) => {
-                    setConnectionError('Error: ' + err.type);
+                    setConnectionError('Error: ' + (err.type || err.message || 'Unknown error'));
                 });
             };
 
@@ -1200,7 +1214,7 @@
                     return;
                 }
                 setConnectionStatus(`Searching... (Slot ${slot})`);
-                const peer = new Peer();
+                const peer = new Peer(peerConfig);
                 quickPlayPeerRef.current = peer;
                 peerRef.current = peer;
                 isHostRef.current = false;
@@ -1223,6 +1237,10 @@
                     if (err.type === 'peer-unavailable') {
                         peer.destroy();
                         hostSlot(slot);
+                    } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'browser-incompatible') {
+                        peer.destroy();
+                        setConnectionError('Error: ' + (err.type || err.message || 'Unknown error'));
+                        cancelQuickPlay();
                     } else {
                         peer.destroy();
                         searchSlot(slot + 1);
@@ -1232,7 +1250,7 @@
 
             const hostSlot = (slot) => {
                 setConnectionStatus(`Waiting for opponent...`);
-                const peer = new Peer(`kick-it-quick-${slot}`);
+                const peer = new Peer(`kick-it-quick-${slot}`, peerConfig);
                 quickPlayPeerRef.current = peer;
                 peerRef.current = peer;
                 isHostRef.current = true;
@@ -1242,7 +1260,7 @@
                 });
 
                 peer.on('connection', (conn) => {
-                    if (status !== 'MENU' || menuState !== 'QUICK_PLAYING') {
+                    if (latestStatus.current !== 'MENU' || latestMenuState.current !== 'QUICK_PLAYING') {
                         const reject = () => {
                             conn.send({ type: 'REJECTED' });
                             setTimeout(() => conn.close(), 500);
@@ -1262,7 +1280,7 @@
                         peer.destroy();
                         searchSlot(slot + 1);
                     } else {
-                        setConnectionError('Error: ' + err.type);
+                        setConnectionError('Error: ' + (err.type || err.message || 'Unknown error'));
                         cancelQuickPlay();
                     }
                 });
