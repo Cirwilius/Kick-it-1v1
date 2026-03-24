@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Kick it: 1v1</title>
+    
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a202c; touch-action: none; }
+        canvas { display: block; }
+        
+        .select-none { -webkit-user-select: none; user-select: none; }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="env,react">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        
+        const GAME_WIDTH = 1024;
+        const GAME_HEIGHT = 576;
+        const GROUND_Y = 516; 
+        const GRAVITY = 0.6;
+        const FRICTION = 0.85;
+        const AIR_RESISTANCE = 0.98;
+
+        const GOAL_WIDTH = 65;
+        const GOAL_HEIGHT = 220;
+
+        const PLAYER_RADIUS = 30;
+        const PLAYER_SPEED = 1.2;
+        const PLAYER_JUMP = 14;
+        const PLAYER_MASS = 15;
+
+        const BALL_RADIUS = 18;
+        const BALL_MASS = 1;
+        const BALL_ELASTICITY = 0.88;
+        const BALL_MAX_SPEED = 28;
+
+        const WIN_SCORE = 10;
+        const GAME_DURATION = 90;
+
+        const COLORS = {
+            background: '#1a202c',
+            ground: '#22543d', 
+            groundLight: '#2f855a', 
+            lines: 'rgba(255, 255, 255, 0.8)',
+            net: 'rgba(255, 255, 255, 0.3)',
+            p1: '#3182ce',
+            p1Dark: '#2c5282',
+            p2: '#e53e3e',
+            p2Dark: '#9b2c2c',
+            ball: '#ffffff',
+            ballDark: '#cbd5e0'
+        };
+
+        const InputKey = {
+            LEFT: 'ArrowLeft',
+            RIGHT: 'ArrowRight',
+            UP: 'ArrowUp',
+            DOWN: 'ArrowDown',
+            A: 'a',
+            D: 'd',
+            W: 'w',
+            S: 's',
+            ESCAPE: 'Escape'
+        };
+
+        
+        const distance = (v1, v2) => {
+            const dx = v1.x - v2.x;
+            const dy = v1.y - v2.y;
+            return Math.sqrt(dx * dx + dy * dy);
+        };
+
+        const dot = (v1, v2) => v1.x * v2.x + v1.y * v2.y;
+
+        const closestPointOnSegment = (p, a, b) => {
+            const ab = { x: b.x - a.x, y: b.y - a.y };
+            const t = ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / (ab.x * ab.x + ab.y * ab.y);
+            const clampedT = Math.max(0, Math.min(1, t));
+            return { x: a.x + ab.x * clampedT, y: a.y + ab.y * clampedT };
+        };
+
+        const resolveStaticCapsuleCollision = (entity, start, end, radius) => {
+            const closest = closestPointOnSegment(entity.pos, start, end);
+            const distVec = { x: entity.pos.x - closest.x, y: entity.pos.y - closest.y };
+            const dist = Math.sqrt(distVec.x * distVec.x + distVec.y * distVec.y);
+            const minDist = entity.radius + radius;
+
+            if (dist < minDist && dist > 0) {
+                const normal = { x: distVec.x / dist, y: distVec.y / dist };
+                const overlap = minDist - dist;
+                entity.pos.x += normal.x * overlap;
+                entity.pos.y += normal.y * overlap;
+
+                const velocityAlongNormal = dot(entity.vel, normal);
+                if (velocityAlongNormal < 0) {
+                    const restitution = entity.restitution * 0.8;
+                    const j = -(1 + restitution) * velocityAlongNormal;
+                    entity.vel.x += j * normal.x;
+                    entity.vel.y += j * normal.y;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const resolveCircleCollision = (e1, e2) => {
+            const dist = distance(e1.pos, e2.pos);
+            const minDist = e1.radius + e2.radius;
+
+            if (dist < minDist) {
+                const normal = {
+                    x: (e2.pos.x - e1.pos.x) / dist,
+                    y: (e2.pos.y - e1.pos.y) / dist
+                };
+
+                const overlap = minDist - dist;
+                const correctionRatio = 0.5;
+                e1.pos.x -= normal.x * overlap * correctionRatio;
+                e1.pos.y -= normal.y * overlap * correctionRatio;
+                e2.pos.x += normal.x * overlap * correctionRatio;
+                e2.pos.y += normal.y * overlap * correctionRatio;
+
+                const relativeVelocity = {
+                    x: e2.vel.x - e1.vel.x,
+                    y: e2.vel.y - e1.vel.y
+                };
+
+                const velocityAlongNormal = dot(relativeVelocity, normal);
+                if (velocityAlongNormal > 0) return;
+
+                const restitution = Math.min(e1.restitution, e2.restitution);
+                let impulseScalar = -(1 + restitution) * velocityAlongNormal;
+                impulseScalar /= (1 / e1.mass + 1 / e2.mass);
+                impulseScalar *= 1.15; 
+
+                const impulse = {
+                    x: impulseScalar * normal.x,
+                    y: impulseScalar * normal.y
+                };
+
+                e1.vel.x -= (1 / e1.mass) * impulse.x;
+                e1.vel.y -= (1 / e1.mass) * impulse.y;
+                e2.vel.x += (1 / e2.mass) * impulse.x;
+                e2.vel.y += (1 / e2.mass) * impulse.y;
+            }
+        };
+
+        
+        class AudioService {
+            constructor() {
+                this.ctx = null;
+                this.enabled = false;
+                this.masterVolume = 0.5;
+            }
+
+            init() {
+                if (!this.ctx) {
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    this.enabled = true;
+                }
+                if (this.ctx.state === 'suspended') {
+                    this.ctx.resume().catch(() => {});
+                }
+            }
+
+            setVolume(val) {
+                this.masterVolume = Math.max(0, Math.min(1, val));
+            }
+
+            play(type) {
+                if (!this.ctx || this.ctx.state === 'suspended') {
+                    this.init();
+                }
+                if (!this.enabled || !this.ctx || this.masterVolume <= 0) return;
+
+                switch (type) {
+                    case 'JUMP': this.playTone(150, 'sine', 0.1, -50); break;
+                    case 'KICK': this.playTone(100, 'square', 0.1, -50); this.playNoise(0.05); break;
+                    case 'WALL': this.playTone(800, 'triangle', 0.05, -100); break;
+                    case 'GOAL': this.playGoalSound(); break;
+                    case 'WIN': this.playWinSound(); break;
+                    case 'UI_SELECT': this.playTone(880, 'sine', 0.05, 0); break;
+                    case 'TYPE': this.playTone(600, 'square', 0.03, 0); break;
+                    case 'INTRO_END': this.playTone(300, 'sawtooth', 0.4, -200); break;
+                }
+            }
+
+            playTone(freq, type, duration, slide = 0) {
+                if (!this.ctx) return;
+                const peakGain = 0.1 * this.masterVolume;
+                if (peakGain <= 0.0001) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+                if (slide !== 0) osc.frequency.linearRampToValueAtTime(Math.max(10, freq + slide), this.ctx.currentTime + duration);
+                gain.gain.setValueAtTime(peakGain, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, peakGain * 0.1), this.ctx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + duration);
+            }
+
+            playNoise(duration) {
+                if (!this.ctx) return;
+                const peakGain = 0.1 * this.masterVolume;
+                if (peakGain <= 0.0001) return;
+                const bufferSize = this.ctx.sampleRate * duration;
+                const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+                const noise = this.ctx.createBufferSource();
+                noise.buffer = buffer;
+                const gain = this.ctx.createGain();
+                gain.gain.setValueAtTime(peakGain, this.ctx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.0001, this.ctx.currentTime + duration);
+                noise.connect(gain);
+                gain.connect(this.ctx.destination);
+                noise.start();
+            }
+
+            playGoalSound() {
+                if (!this.ctx) return;
+                const peakGain = 0.1 * this.masterVolume;
+                const now = this.ctx.currentTime;
+                [440, 554, 659, 880].forEach((freq, i) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(freq, now + i * 0.1);
+                    gain.gain.setValueAtTime(peakGain, now + i * 0.1);
+                    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, peakGain * 0.1), now + i * 0.1 + 0.5);
+                    osc.connect(gain);
+                    gain.connect(this.ctx.destination);
+                    osc.start(now + i * 0.1);
+                    osc.stop(now + i * 0.1 + 0.5);
+                });
+            }
+
+            playWinSound() {
+                if (!this.ctx) return;
+                const peakGain = 0.1 * this.masterVolume;
+                const now = this.ctx.currentTime;
+                [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(freq, now + i * 0.15);
+                    gain.gain.setValueAtTime(peakGain, now + i * 0.15);
+                    gain.gain.linearRampToValueAtTime(0.0001, now + i * 0.15 + 0.8);
+                    osc.connect(gain);
+                    gain.connect(this.ctx.destination);
+                    osc.start(now + i * 0.15);
+                    osc.stop(now + i * 0.15 + 0.8);
+                });
+            }
+        }
+
+        const audioService = new AudioService();
+
+        
+        class GameEngine {
+            constructor() {
+                this.defaultState = this.createInitialState();
+                this.state = JSON.parse(JSON.stringify(this.defaultState));
+                this.difficulty = 'MEDIUM';
+            }
+
+            setDifficulty(d) {
+                this.difficulty = d;
+            }
+
+            createInitialState() {
+                return {
+                    isPlaying: false,
+                    isGoal: false,
+                    winner: null,
+                    score: { p1: 0, p2: 0 },
+                    lastScorer: 0,
+                    timeLeft: GAME_DURATION,
+                    player1: {
+                        id: 1,
+                        pos: { x: GAME_WIDTH * 0.25, y: GROUND_Y - PLAYER_RADIUS },
+                        vel: { x: 0, y: 0 },
+                        radius: PLAYER_RADIUS,
+                        mass: PLAYER_MASS,
+                        restitution: 0.5,
+                        color: COLORS.p1,
+                        isGrounded: false,
+                        score: 0,
+                        speed: PLAYER_SPEED,
+                        jumpForce: PLAYER_JUMP
+                    },
+                    player2: {
+                        id: 2,
+                        pos: { x: GAME_WIDTH * 0.75, y: GROUND_Y - PLAYER_RADIUS },
+                        vel: { x: 0, y: 0 },
+                        radius: PLAYER_RADIUS,
+                        mass: PLAYER_MASS,
+                        restitution: 0.5,
+                        color: COLORS.p2,
+                        isGrounded: false,
+                        score: 0,
+                        speed: PLAYER_SPEED,
+                        jumpForce: PLAYER_JUMP
+                    },
+                    ball: {
+                        pos: { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 3 },
+                        vel: { x: 0, y: 0 },
+                        radius: BALL_RADIUS,
+                        mass: BALL_MASS,
+                        restitution: BALL_ELASTICITY,
+                        color: COLORS.ball
+                    }
+                };
+            }
+
+            resetPositions() {
+                this.state.player1.pos = { x: GAME_WIDTH * 0.25, y: GROUND_Y - PLAYER_RADIUS };
+                this.state.player1.vel = { x: 0, y: 0 };
+                this.state.player2.pos = { x: GAME_WIDTH * 0.75, y: GROUND_Y - PLAYER_RADIUS };
+                this.state.player2.vel = { x: 0, y: 0 };
+                this.state.ball.pos = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 3 };
+                this.state.ball.vel = { x: 0, y: 0 };
+                this.state.isGoal = false;
+                this.state.lastScorer = 0;
+            }
+
+            update(input, isTwoPlayerMode, onSound) {
+                if (this.state.isGoal || this.state.winner) return;
+
+                this.state.timeLeft -= 1 / 60;
+                if (this.state.timeLeft < 0) this.state.timeLeft = 0;
+
+                this.updatePlayer(this.state.player1, input.p1, onSound);
+                
+                if (isTwoPlayerMode) {
+                    this.updatePlayer(this.state.player2, input.p2, onSound);
+                } else {
+                    this.updateAI(this.state.player2, this.state.player1, this.state.ball, onSound);
+                }
+                
+                this.updateBall(this.state.ball, onSound);
+
+                const v1Before = { ...this.state.player1.vel };
+                const bBefore = { ...this.state.ball.vel };
+
+                resolveCircleCollision(this.state.player1, this.state.ball);
+                resolveCircleCollision(this.state.player2, this.state.ball);
+                
+                const kickThreshold = 1;
+                if (Math.abs(this.state.ball.vel.x - bBefore.x) > kickThreshold || Math.abs(this.state.ball.vel.y - bBefore.y) > kickThreshold) {
+                    onSound('KICK');
+                }
+
+                resolveCircleCollision(this.state.player1, this.state.player2);
+                this.checkGoal(onSound);
+            }
+
+            updatePlayer(p, input, onSound) {
+                if (input.left) p.vel.x -= p.speed;
+                if (input.right) p.vel.x += p.speed;
+                if (input.jump && p.isGrounded) {
+                    p.vel.y = -p.jumpForce;
+                    p.isGrounded = false;
+                    onSound('JUMP');
+                }
+                this.applyPhysics(p);
+                this.constrainPlayer(p);
+            }
+
+            updateAI(ai, opponent, ball, onSound) {
+                let speedMult = 1;
+                let aggression = 0; 
+                let jumpSensitivity = 1; 
+                let lookAheadFrames = 12; 
+                let deadzone = 12; 
+                let defenseCushion = 120; 
+
+                if (this.difficulty === 'EASY') {
+                    speedMult = 0.6; aggression = -60; jumpSensitivity = 0.3; lookAheadFrames = 0; deadzone = 60; defenseCushion = 180;
+                } else if (this.difficulty === 'MEDIUM') {
+                    speedMult = 0.85; aggression = -20; jumpSensitivity = 0.65; lookAheadFrames = 6; deadzone = 40; defenseCushion = 150;
+                } else if (this.difficulty === 'HARD') {
+                    speedMult = 1.05; aggression = 0; jumpSensitivity = 1.0; lookAheadFrames = 12; deadzone = 20; defenseCushion = 120;
+                } else if (this.difficulty === 'INSANE') {
+                    speedMult = 1.35; aggression = 45; jumpSensitivity = 1.3; lookAheadFrames = 20; deadzone = 5; defenseCushion = 70;
+                }
+
+                ai.speed = PLAYER_SPEED * speedMult;
+
+                const isBallLeftOfAI = ball.pos.x < ai.pos.x; 
+                const ballMovingToOwnGoal = ball.vel.x > 1;
+                const opponentHasPossession = distance(opponent.pos, ball.pos) < 140;
+
+                let targetX = ball.pos.x + 40 - aggression; 
+                
+                if (ball.pos.x < GAME_WIDTH * 0.6 && (opponentHasPossession || ballMovingToOwnGoal)) {
+                   targetX = ball.pos.x + defenseCushion + (ball.vel.x * 15); 
+                } else if (ballMovingToOwnGoal && ball.pos.x > GAME_WIDTH * 0.6) {
+                   targetX = ball.pos.x + 25;
+                }
+
+                if (!ballMovingToOwnGoal && ball.pos.y < GROUND_Y - 60) {
+                    targetX = ball.pos.x + (ball.vel.x * lookAheadFrames) + 30;
+                }
+
+                if (targetX > GAME_WIDTH - 25) targetX = GAME_WIDTH - 25;
+                if (targetX < 0) targetX = 0;
+
+                if (ballMovingToOwnGoal && ball.pos.x > GAME_WIDTH * 0.4) {
+                     deadzone = 5; 
+                }
+
+                let moveDir = 0;
+                if (Math.abs(ai.pos.x - targetX) > deadzone) {
+                    moveDir = ai.pos.x < targetX ? 1 : -1;
+                }
+
+                if (!isBallLeftOfAI && ball.pos.x > ai.pos.x + 10) {
+                    moveDir = 1; 
+                }
+                
+                ai.vel.x += moveDir * ai.speed;
+
+                if (ai.isGrounded) {
+                    const dx = ai.pos.x - ball.pos.x;
+                    const t = (ball.vel.x > 0.5) ? dx / ball.vel.x : 999;
+                    let predY = ball.pos.y;
+                    if (t > 0 && t < 40) predY = ball.pos.y + ball.vel.y * t + 0.5 * GRAVITY * t * t;
+
+                    const jumpReach = ai.pos.y - 160; 
+
+                    if (ball.vel.x > 4 && t > 0 && t < 30 * jumpSensitivity) {
+                        if (predY < ai.pos.y - 20 && predY > jumpReach) {
+                            if (Math.abs(dx) < 100 * jumpSensitivity) {
+                                ai.vel.y = -ai.jumpForce;
+                                ai.isGrounded = false;
+                                onSound('JUMP');
+                            }
+                        }
+                    } else if (Math.abs(dx) < 60 * jumpSensitivity && ball.pos.y < ai.pos.y - 60) {
+                         if (ball.vel.y > -5) {
+                            ai.vel.y = -ai.jumpForce;
+                            ai.isGrounded = false;
+                            onSound('JUMP');
+                         }
+                    } else if (distance(ai.pos, opponent.pos) < 90 && ball.pos.y < GROUND_Y - 50 && Math.abs(dx) < 70) {
+                         ai.vel.y = -ai.jumpForce;
+                         ai.isGrounded = false;
+                         onSound('JUMP');
+                    }
+                }
+
+                this.applyPhysics(ai);
+                this.constrainPlayer(ai);
+            }
+
+            applyPhysics(e) {
+                e.vel.y += GRAVITY;
+                e.vel.x *= FRICTION;
+                e.pos.x += e.vel.x;
+                e.pos.y += e.vel.y;
+            }
+
+            updateBall(b, onSound) {
+                b.vel.y += GRAVITY;
+                b.vel.x *= AIR_RESISTANCE;
+
+                const speed = Math.sqrt(b.vel.x * b.vel.x + b.vel.y * b.vel.y);
+                if (speed > BALL_MAX_SPEED) {
+                    const scale = BALL_MAX_SPEED / speed;
+                    b.vel.x *= scale;
+                    b.vel.y *= scale;
+                }
+
+                b.pos.x += b.vel.x;
+                b.pos.y += b.vel.y;
+
+                const goalTopY = GROUND_Y - GOAL_HEIGHT;
+                if (b.pos.y - b.radius < -500) { 
+                    b.pos.y = -500; 
+                    b.vel.y = 0; 
+                }
+
+                if (b.pos.y + b.radius > GROUND_Y) {
+                    const impact = Math.abs(b.vel.y);
+                    b.pos.y = GROUND_Y - b.radius;
+                    b.vel.y *= -b.restitution;
+                    if (impact > 2) onSound('WALL');
+                }
+
+                const isAboveGoal = b.pos.y < goalTopY + b.radius; 
+                if (isAboveGoal) {
+                    if (b.pos.x - b.radius < 0) {
+                        b.pos.x = b.radius;
+                        b.vel.x *= -0.8;
+                        onSound('WALL');
+                    } else if (b.pos.x + b.radius > GAME_WIDTH) {
+                        b.pos.x = GAME_WIDTH - b.radius;
+                        b.vel.x *= -0.8;
+                        onSound('WALL');
+                    }
+                } else {
+                    if (b.pos.x < -100) { b.pos.x = -100; b.vel.x *= -0.5; }
+                    if (b.pos.x > GAME_WIDTH + 100) { b.pos.x = GAME_WIDTH + 100; b.vel.x *= -0.5; }
+                }
+
+                const barRadius = 6; 
+                const leftBarStart = { x: -50, y: goalTopY };
+                const leftBarEnd = { x: GOAL_WIDTH, y: goalTopY };
+                
+                if (resolveStaticCapsuleCollision(b, leftBarStart, leftBarEnd, barRadius)) {
+                    onSound('WALL');
+                    if (b.pos.y < goalTopY) {
+                        b.vel.y = Math.min(b.vel.y, -9); 
+                        b.vel.x = Math.abs(b.vel.x) * 0.5 + 8;
+                    }
+                }
+
+                const rightBarStart = { x: GAME_WIDTH - GOAL_WIDTH, y: goalTopY };
+                const rightBarEnd = { x: GAME_WIDTH + 50, y: goalTopY };
+
+                if (resolveStaticCapsuleCollision(b, rightBarStart, rightBarEnd, barRadius)) {
+                    onSound('WALL');
+                    if (b.pos.y < goalTopY) {
+                        b.vel.y = Math.min(b.vel.y, -9);
+                        b.vel.x = -(Math.abs(b.vel.x) * 0.5 + 8);
+                    }
+                }
+            }
+
+            constrainPlayer(p) {
+                if (p.pos.y + p.radius > GROUND_Y) {
+                    p.pos.y = GROUND_Y - p.radius;
+                    p.vel.y = 0;
+                    p.isGrounded = true;
+                }
+                if (p.pos.x - p.radius < 0) {
+                    p.pos.x = p.radius;
+                    p.vel.x = 0;
+                }
+                if (p.pos.x + p.radius > GAME_WIDTH) {
+                    p.pos.x = GAME_WIDTH - p.radius;
+                    p.vel.x = 0;
+                }
+            }
+
+            checkGoal(onSound) {
+                const goalTopY = GROUND_Y - GOAL_HEIGHT;
+                if (this.state.ball.pos.y > goalTopY + this.state.ball.radius * 0.5) {
+                    if (this.state.ball.pos.x < GOAL_WIDTH) {
+                        this.handleGoal(2, onSound);
+                    } else if (this.state.ball.pos.x > GAME_WIDTH - GOAL_WIDTH) {
+                        this.handleGoal(1, onSound);
+                    }
+                }
+            }
+
+            handleGoal(scorerId, onSound) {
+                this.state.isGoal = true;
+                this.state.lastScorer = scorerId;
+                if (scorerId === 1) this.state.score.p1++;
+                else this.state.score.p2++;
+                
+                if (this.state.score.p1 >= WIN_SCORE || this.state.score.p2 >= WIN_SCORE) {
+                    onSound('WIN');
+                } else {
+                    onSound('GOAL');
+                }
+            }
+        }
+
+        
+
+        const GameCanvas = () => {
+            const canvasRef = useRef(null);
+            const engineRef = useRef(new GameEngine());
+            const requestRef = useRef(0);
+            
+            const [status, setStatus] = useState('INTRO');
+            const [menuState, setMenuState] = useState('MAIN');
+            const [isTwoPlayer, setIsTwoPlayer] = useState(false);
+            const [selectedDifficulty, setSelectedDifficulty] = useState('MEDIUM'); 
+            const [score, setScore] = useState({ p1: 0, p2: 0 });
+            const [timeLeft, setTimeLeft] = useState(GAME_DURATION);
+            const [winner, setWinner] = useState(null);
+            const [volume, setVolume] = useState(50);
+            const [isExiting, setIsExiting] = useState(false);
+            const [countdown, setCountdown] = useState(null);
+
+            
+            const [peerId, setPeerId] = useState('');
+            const [joinId, setJoinId] = useState('');
+            const [connectionStatus, setConnectionStatus] = useState('');
+            const [connectionError, setConnectionError] = useState('');
+            const [playerName, setPlayerName] = useState(() => localStorage.getItem('kickItPlayerName') || '');
+            const [opponentName, setOpponentName] = useState('');
+
+            useEffect(() => {
+                localStorage.setItem('kickItPlayerName', playerName);
+            }, [playerName]);
+
+            const peerRef = useRef(null);
+            const connRef = useRef(null);
+            const quickPlayPeerRef = useRef(null);
+            const quickPlaySlotRef = useRef(1);
+            const isHostRef = useRef(false);
+            const isOnlineRef = useRef(false);
+            const clientInputRef = useRef({ left: false, right: false, jump: false });
+
+            const latestScore = useRef(score);
+            const latestStatus = useRef(status);
+            const latestWinner = useRef(winner);
+
+            useEffect(() => { latestScore.current = score; }, [score]);
+            useEffect(() => { latestStatus.current = status; }, [status]);
+            useEffect(() => { latestWinner.current = winner; }, [winner]);
+
+            const [introText, setIntroText] = useState("");
+            const FULL_INTRO_TEXT = "CIRWILIUS";
+            
+            const activeKeys = useRef(new Set());
+            const lastTimeRef = useRef(0);
+            const accumulatorRef = useRef(0);
+            const FIXED_TIME_STEP = 1 / 60;
+            const MAX_FRAME_TIME = 0.25;
+
+            useEffect(() => {
+                if (status !== 'INTRO') return;
+                audioService.init();
+
+                let charIndex = 0;
+                let typeInterval = null;
+                let endTimeout = null;
+
+                typeInterval = setInterval(() => {
+                    if (charIndex < FULL_INTRO_TEXT.length) {
+                        setIntroText(prev => prev + FULL_INTRO_TEXT.charAt(charIndex));
+                        audioService.play('TYPE');
+                        charIndex++;
+                    } else {
+                        clearInterval(typeInterval);
+                        endTimeout = setTimeout(() => {
+                            audioService.play('INTRO_END');
+                            setStatus('MENU');
+                        }, 1000);
+                    }
+                }, 150);
+
+                const skipIntro = () => {
+                    clearInterval(typeInterval);
+                    clearTimeout(endTimeout);
+                    audioService.play('INTRO_END');
+                    setStatus('MENU');
+                };
+
+                window.addEventListener('keydown', skipIntro);
+                window.addEventListener('click', skipIntro);
+                window.addEventListener('touchstart', skipIntro);
+                return () => {
+                    clearInterval(typeInterval);
+                    clearTimeout(endTimeout);
+                    window.removeEventListener('keydown', skipIntro);
+                    window.removeEventListener('click', skipIntro);
+                    window.removeEventListener('touchstart', skipIntro);
+                };
+            }, [status]);
+
+            useEffect(() => {
+                audioService.setVolume(0.5);
+            }, []);
+
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    activeKeys.current.add(e.key);
+                    if (e.key === InputKey.ESCAPE) {
+                        if (status === 'PLAYING') {
+                            setStatus('PAUSED');
+                        } else if (status === 'PAUSED') {
+                            if (isOnlineRef.current && !isHostRef.current) {
+                                setStatus('PLAYING');
+                            } else {
+                                setCountdown(3);
+                                setStatus('COUNTDOWN');
+                            }
+                        }
+                    }
+                };
+                const handleKeyUp = (e) => activeKeys.current.delete(e.key);
+                window.addEventListener('keydown', handleKeyDown);
+                window.addEventListener('keyup', handleKeyUp);
+                return () => {
+                    window.removeEventListener('keydown', handleKeyDown);
+                    window.removeEventListener('keyup', handleKeyUp);
+                };
+            }, [status]);
+
+            useEffect(() => {
+                if (status === 'COUNTDOWN' && countdown !== null) {
+                    if (countdown > 0) {
+                        audioService.play('UI_SELECT');
+                        const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+                        return () => clearTimeout(timer);
+                    } else {
+                        audioService.play('INTRO_END'); 
+                        setStatus('PLAYING');
+                        setCountdown(null);
+                    }
+                }
+            }, [status, countdown]);
+
+            const getInputState = (is2P) => {
+                const keys = activeKeys.current;
+                const p1Left = keys.has(InputKey.A) || (!is2P && keys.has(InputKey.LEFT));
+                const p1Right = keys.has(InputKey.D) || (!is2P && keys.has(InputKey.RIGHT));
+                const p1Jump = keys.has(InputKey.W) || (!is2P && keys.has(InputKey.UP));
+
+                const p2Left = is2P && keys.has(InputKey.LEFT);
+                const p2Right = is2P && keys.has(InputKey.RIGHT);
+                const p2Jump = is2P && keys.has(InputKey.UP);
+
+                return {
+                    p1: { left: p1Left, right: p1Right, jump: p1Jump },
+                    p2: { left: p2Left, right: p2Right, jump: p2Jump }
+                };
+            };
+
+            const getClientInputState = () => {
+                const keys = activeKeys.current;
+                return {
+                    left: keys.has(InputKey.A) || keys.has(InputKey.LEFT),
+                    right: keys.has(InputKey.D) || keys.has(InputKey.RIGHT),
+                    jump: keys.has(InputKey.W) || keys.has(InputKey.UP)
+                };
+            };
+
+            const drawGradientCircle = (ctx, x, y, r, colorStart, colorEnd) => {
+                const grad = ctx.createRadialGradient(x - r/3, y - r/3, r/10, x, y, r);
+                grad.addColorStop(0, colorStart);
+                grad.addColorStop(1, colorEnd);
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = "rgba(255,255,255,0.2)";
+                ctx.beginPath();
+                ctx.arc(x - r/3, y - r/3, r/4, 0, Math.PI * 2);
+                ctx.fill();
+            };
+
+            const drawPlayerEyes = (ctx, x, y, r, velX) => {
+                const lookDir = velX >= 0 ? 1 : -1;
+                const eyeOffsetX = r * 0.4 * lookDir;
+                const eyeOffsetY = -r * 0.2;
+                const eyeSize = r * 0.25;
+
+                ctx.fillStyle = "white";
+                ctx.beginPath();
+                ctx.arc(x + eyeOffsetX, y + eyeOffsetY, eyeSize, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = "black";
+                ctx.beginPath();
+                ctx.arc(x + eyeOffsetX + (lookDir * 2), y + eyeOffsetY, eyeSize * 0.4, 0, Math.PI * 2);
+                ctx.fill();
+            };
+
+            const drawNet = (ctx, x, y, w, h, isRight) => {
+                ctx.save();
+                ctx.strokeStyle = COLORS.net;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                
+                const backX = isRight ? x + w : x;
+                const frontX = isRight ? x : x + w;
+
+                ctx.strokeStyle = "white";
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(frontX, y);
+                ctx.lineTo(frontX, y + h); 
+                ctx.moveTo(frontX, y); 
+                ctx.lineTo(backX, y); 
+                ctx.stroke();
+
+                ctx.strokeStyle = COLORS.net;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                const step = 12;
+                
+                for(let i = y; i <= y + h; i += step) {
+                ctx.moveTo(x, i);
+                ctx.lineTo(x + w, i);
+                }
+                for(let i = x; i <= x + w; i += step) {
+                ctx.moveTo(i, y);
+                ctx.lineTo(i, y + h);
+                }
+                ctx.stroke();
+                ctx.restore();
+            };
+
+            const draw = (ctx, engine) => {
+                const bgGradient = ctx.createLinearGradient(0, 0, 0, GAME_HEIGHT);
+                bgGradient.addColorStop(0, "#1a202c");
+                bgGradient.addColorStop(1, "#2d3748");
+                ctx.fillStyle = bgGradient;
+                ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+                const stripeWidth = GAME_WIDTH / 10;
+                for (let i = 0; i < GAME_WIDTH; i += stripeWidth) {
+                    ctx.fillStyle = (i / stripeWidth) % 2 === 0 ? COLORS.ground : COLORS.groundLight;
+                    ctx.fillRect(i, GROUND_Y, stripeWidth, GAME_HEIGHT - GROUND_Y);
+                }
+
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = "white";
+                ctx.strokeStyle = COLORS.lines;
+                ctx.lineWidth = 3;
+
+                ctx.beginPath();
+                ctx.moveTo(GAME_WIDTH / 2, GROUND_Y);
+                ctx.lineTo(GAME_WIDTH / 2, GAME_HEIGHT);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.arc(GAME_WIDTH / 2, GROUND_Y, 100, 0, Math.PI, false);
+                ctx.stroke();
+                
+                ctx.shadowBlur = 0;
+
+                drawNet(ctx, 0, GROUND_Y - GOAL_HEIGHT, GOAL_WIDTH, GOAL_HEIGHT, false);
+                drawNet(ctx, GAME_WIDTH - GOAL_WIDTH, GROUND_Y - GOAL_HEIGHT, GOAL_WIDTH, GOAL_HEIGHT, true);
+
+                const { player1, player2, ball } = engine.state;
+
+                ctx.fillStyle = "rgba(0,0,0,0.3)";
+                const drawShadow = (x, y, r) => {
+                    const height = Math.max(0, GROUND_Y - (y + r)); 
+                    const scale = Math.max(0.5, 1 - height / 300);
+                    ctx.beginPath();
+                    ctx.ellipse(x, GROUND_Y, r * scale, r * 0.3 * scale, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                };
+                drawShadow(player1.pos.x, player1.pos.y, player1.radius);
+                drawShadow(player2.pos.x, player2.pos.y, player2.radius);
+                drawShadow(ball.pos.x, ball.pos.y, ball.radius);
+
+                drawGradientCircle(ctx, player1.pos.x, player1.pos.y, player1.radius, COLORS.p1, COLORS.p1Dark);
+                drawPlayerEyes(ctx, player1.pos.x, player1.pos.y, player1.radius, player1.vel.x);
+                
+                drawGradientCircle(ctx, player2.pos.x, player2.pos.y, player2.radius, COLORS.p2, COLORS.p2Dark);
+                drawPlayerEyes(ctx, player2.pos.x, player2.pos.y, player2.radius, player2.vel.x);
+
+                drawGradientCircle(ctx, ball.pos.x, ball.pos.y, ball.radius, COLORS.ball, COLORS.ballDark);
+                ctx.strokeStyle = "#cbd5e0";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(ball.pos.x, ball.pos.y, ball.radius * 0.6, 0, Math.PI * 2);
+                ctx.stroke();
+                
+                ctx.fillStyle = "white";
+                ctx.font = "bold 14px sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText(isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "P1")) : "P1", player1.pos.x, player1.pos.y - player1.radius - 15);
+                ctx.fillText(isOnlineRef.current ? (isHostRef.current ? (opponentName || "P2") : playerName) : (isTwoPlayer ? "P2" : "CPU"), player2.pos.x, player2.pos.y - player2.radius - 15);
+            };
+
+            const gameLoop = useCallback((time) => {
+                let frameTime = (time - lastTimeRef.current) / 1000;
+                lastTimeRef.current = time;
+                if (frameTime > MAX_FRAME_TIME) frameTime = MAX_FRAME_TIME;
+
+                const engine = engineRef.current;
+                const canvas = canvasRef.current;
+                const ctx = canvas?.getContext('2d');
+
+                if (status === 'PLAYING') {
+                    accumulatorRef.current += frameTime;
+                    while (accumulatorRef.current >= FIXED_TIME_STEP) {
+                        if (!winner) {
+                            if (!isOnlineRef.current || isHostRef.current) {
+                                const inputs = getInputState(isTwoPlayer);
+                                if (isOnlineRef.current && isHostRef.current) {
+                                    inputs.p2 = clientInputRef.current;
+                                }
+
+                                engine.update(inputs, isTwoPlayer, (type) => {
+                                    audioService.play(type);
+                                    if (isOnlineRef.current && isHostRef.current && connRef.current) {
+                                        connRef.current.send({ type: 'SOUND', sound: type });
+                                    }
+                                });
+                                
+                                if (engine.state.isGoal && !engine.state.winner) {
+                                    if (score.p1 !== engine.state.score.p1 || score.p2 !== engine.state.score.p2) {
+                                        setScore({ ...engine.state.score });
+                                    }
+
+                                    if (engine.state.score.p1 >= WIN_SCORE) {
+                                        setWinner('Player 1 Wins!');
+                                        setStatus('ENDED');
+                                        audioService.play('WIN');
+                                    } else if (engine.state.score.p2 >= WIN_SCORE) {
+                                        setWinner(isTwoPlayer ? 'Player 2 Wins!' : 'Computer Wins!');
+                                        setStatus('ENDED');
+                                        audioService.play('WIN');
+                                    } else {
+                                        if (!engineRef.current['resetPending']) {
+                                            engineRef.current['resetPending'] = true;
+                                            setTimeout(() => {
+                                                engine.resetPositions();
+                                                engineRef.current['resetPending'] = false;
+                                                setScore({...engine.state.score}); 
+                                            }, 1500);
+                                        }
+                                    }
+                                }
+
+                                if (engine.state.timeLeft <= 0 && !engine.state.isGoal) {
+                                    if (engine.state.score.p1 > engine.state.score.p2) {
+                                        setWinner('Player 1 Wins!');
+                                    } else if (engine.state.score.p2 > engine.state.score.p1) {
+                                        setWinner(isTwoPlayer ? 'Player 2 Wins!' : 'Computer Wins!');
+                                    } else {
+                                        setWinner('Draw!');
+                                    }
+                                    setStatus('ENDED');
+                                    audioService.play('WIN');
+                                }
+                            } else {
+                                
+                                const clientInput = getClientInputState();
+                                if (connRef.current && connRef.current.open) {
+                                    connRef.current.send({ type: 'INPUT', input: clientInput });
+                                }
+                            }
+                        }
+                        accumulatorRef.current -= FIXED_TIME_STEP;
+                    }
+                }
+
+                if (ctx) draw(ctx, engine);
+
+                if (!isOnlineRef.current || isHostRef.current) {
+                    const engineTime = Math.ceil(engine.state.timeLeft);
+                    setTimeLeft(prev => prev !== engineTime ? engineTime : prev);
+
+                    if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
+                        connRef.current.send({
+                            type: 'STATE',
+                            state: engine.state,
+                            score: latestScore.current,
+                            status: latestStatus.current,
+                            winner: latestWinner.current
+                        });
+                    }
+                }
+
+                requestRef.current = requestAnimationFrame(gameLoop);
+            }, [status, isTwoPlayer, winner, score]);
+
+            useEffect(() => {
+                requestRef.current = requestAnimationFrame(gameLoop);
+                return () => {
+                    if (requestRef.current) cancelAnimationFrame(requestRef.current);
+                };
+            }, [gameLoop]);
+
+            const playUiSound = () => {
+                audioService.init();
+                audioService.play('UI_SELECT');
+            };
+
+            const handleVolumeChange = (e) => {
+                const val = parseInt(e.target.value);
+                setVolume(val);
+                audioService.setVolume(val / 100);
+                if (Math.random() > 0.8) audioService.play('UI_SELECT'); 
+            };
+
+            const startGame = (mode2P, difficulty = 'MEDIUM', online = false) => {
+                playUiSound();
+                setIsTwoPlayer(mode2P);
+                setSelectedDifficulty(difficulty);
+                isOnlineRef.current = online;
+                
+                engineRef.current = new GameEngine();
+                engineRef.current.setDifficulty(difficulty);
+                
+                setScore({ p1: 0, p2: 0 });
+                setTimeLeft(GAME_DURATION);
+                setWinner(null);
+                setMenuState('MAIN');
+                
+                setCountdown(3);
+                setStatus('COUNTDOWN');
+            };
+
+            const setupConnection = (conn, isHost) => {
+                const initConn = () => {
+                    isHostRef.current = isHost;
+                    isOnlineRef.current = true;
+                    conn.send({ type: 'SET_NAME', name: playerName });
+                    
+                    if (isHost) {
+                        startGame(true, 'MEDIUM', true);
+                        conn.send({ type: 'START' });
+                    } else {
+                        setConnectionStatus('Connected! Waiting for host to start...');
+                    }
+                };
+
+                if (conn.open) {
+                    initConn();
+                } else {
+                    conn.on('open', initConn);
+                }
+
+                conn.on('data', (data) => {
+                    if (data.type === 'REJECTED') {
+                        if (menuState === 'QUICK_PLAYING') {
+                            if (quickPlayPeerRef.current) quickPlayPeerRef.current.destroy();
+                            searchSlot(quickPlaySlotRef.current + 1);
+                        } else {
+                            setConnectionError('Host is busy.');
+                            cancelJoin();
+                        }
+                        return;
+                    }
+                    if (data.type === 'SET_NAME') {
+                        setOpponentName(data.name);
+                        return;
+                    }
+                    if (isHost) {
+                        if (data.type === 'INPUT') {
+                            clientInputRef.current = data.input;
+                        }
+                    } else {
+                        if (data.type === 'START') {
+                            startGame(true, 'MEDIUM', true);
+                        } else if (data.type === 'STATE') {
+                            engineRef.current.state = data.state;
+                            if (latestScore.current.p1 !== data.score.p1 || latestScore.current.p2 !== data.score.p2) {
+                                setScore(data.score);
+                            }
+                            if (latestStatus.current !== data.status) {
+                                
+                                if (!(latestStatus.current === 'PAUSED' && data.status === 'PLAYING')) {
+                                    setStatus(data.status);
+                                    if (data.status === 'COUNTDOWN') {
+                                        setCountdown(3);
+                                    }
+                                }
+                            }
+                            if (latestWinner.current !== data.winner) {
+                                setWinner(data.winner);
+                            }
+                            setTimeLeft(Math.ceil(data.state.timeLeft));
+                        } else if (data.type === 'SOUND') {
+                            audioService.play(data.sound);
+                        }
+                    }
+                });
+
+                conn.on('close', () => {
+                    setConnectionError('Connection lost');
+                    setTimeout(() => {
+                        quitToMenu();
+                        setConnectionError('');
+                    }, 2000);
+                });
+
+                conn.on('error', (err) => {
+                    setConnectionError('Connection error: ' + err.type);
+                    setTimeout(() => {
+                        quitToMenu();
+                        setConnectionError('');
+                    }, 2000);
+                });
+            };
+
+            const hostOnlineGame = () => {
+                playUiSound();
+                setMenuState('HOSTING');
+                setConnectionStatus('Creating peer...');
+                const peer = new Peer();
+                peerRef.current = peer;
+                
+                peer.on('open', (id) => {
+                    setPeerId(id);
+                    setConnectionStatus('Waiting for opponent...');
+                });
+
+                peer.on('connection', (conn) => {
+                    if (status !== 'MENU' || menuState !== 'HOSTING') {
+                        const reject = () => {
+                            conn.send({ type: 'REJECTED' });
+                            setTimeout(() => conn.close(), 500);
+                        };
+                        if (conn.open) reject();
+                        else conn.on('open', reject);
+                        return;
+                    }
+                    setConnectionStatus('Opponent connected!');
+                    connRef.current = conn;
+                    setupConnection(conn, true);
+                });
+
+                peer.on('error', (err) => {
+                    setConnectionError('Error: ' + err.type);
+                });
+            };
+
+            const joinOnlineGame = () => {
+                playUiSound();
+                if (!joinId) return;
+                setConnectionStatus('Connecting...');
+                const peer = new Peer();
+                peerRef.current = peer;
+                
+                peer.on('open', () => {
+                    const conn = peer.connect(joinId);
+                    connRef.current = conn;
+                    setupConnection(conn, false);
+                });
+
+                peer.on('error', (err) => {
+                    setConnectionError('Error: ' + err.type);
+                });
+            };
+
+            const cancelHost = () => {
+                playUiSound();
+                if (peerRef.current) {
+                    peerRef.current.destroy();
+                    peerRef.current = null;
+                }
+                setMenuState('ONLINE_MENU');
+                setConnectionStatus('');
+            };
+
+            const cancelJoin = () => {
+                playUiSound();
+                if (peerRef.current) {
+                    peerRef.current.destroy();
+                    peerRef.current = null;
+                }
+                setMenuState('ONLINE_MENU');
+                setConnectionStatus('');
+            };
+
+            const quickPlay = () => {
+                playUiSound();
+                setMenuState('QUICK_PLAYING');
+                setConnectionStatus('Searching for match...');
+                quickPlaySlotRef.current = 1;
+                searchSlot(1);
+            };
+
+            const searchSlot = (slot) => {
+                quickPlaySlotRef.current = slot;
+                if (slot > 20) {
+                    setConnectionError('No matches found. Try again later.');
+                    setMenuState('ONLINE_MENU');
+                    return;
+                }
+                setConnectionStatus(`Searching... (Slot ${slot})`);
+                const peer = new Peer();
+                quickPlayPeerRef.current = peer;
+                peerRef.current = peer;
+                isHostRef.current = false;
+
+                peer.on('open', () => {
+                    const conn = peer.connect(`kick-it-quick-${slot}`);
+                    
+                    conn.on('open', () => {
+                        connRef.current = conn;
+                        setupConnection(conn, false);
+                    });
+
+                    conn.on('error', () => {
+                        peer.destroy();
+                        searchSlot(slot + 1);
+                    });
+                });
+
+                peer.on('error', (err) => {
+                    if (err.type === 'peer-unavailable') {
+                        peer.destroy();
+                        hostSlot(slot);
+                    } else {
+                        peer.destroy();
+                        searchSlot(slot + 1);
+                    }
+                });
+            };
+
+            const hostSlot = (slot) => {
+                setConnectionStatus(`Waiting for opponent...`);
+                const peer = new Peer(`kick-it-quick-${slot}`);
+                quickPlayPeerRef.current = peer;
+                peerRef.current = peer;
+                isHostRef.current = true;
+
+                peer.on('open', () => {
+                    
+                });
+
+                peer.on('connection', (conn) => {
+                    if (status !== 'MENU' || menuState !== 'QUICK_PLAYING') {
+                        const reject = () => {
+                            conn.send({ type: 'REJECTED' });
+                            setTimeout(() => conn.close(), 500);
+                        };
+                        if (conn.open) reject();
+                        else conn.on('open', reject);
+                        return;
+                    }
+                    
+                    setConnectionStatus('Opponent found!');
+                    connRef.current = conn;
+                    setupConnection(conn, true);
+                });
+
+                peer.on('error', (err) => {
+                    if (err.type === 'unavailable-id') {
+                        peer.destroy();
+                        searchSlot(slot + 1);
+                    } else {
+                        setConnectionError('Error: ' + err.type);
+                        cancelQuickPlay();
+                    }
+                });
+            };
+
+            const cancelQuickPlay = () => {
+                playUiSound();
+                if (quickPlayPeerRef.current) {
+                    quickPlayPeerRef.current.destroy();
+                    quickPlayPeerRef.current = null;
+                }
+                if (peerRef.current) {
+                    peerRef.current.destroy();
+                    peerRef.current = null;
+                }
+                setMenuState('ONLINE_MENU');
+                setConnectionStatus('');
+            };
+
+            const restartGame = () => {
+                if (isOnlineRef.current && isHostRef.current && connRef.current) {
+                    connRef.current.send({ type: 'START' });
+                }
+                startGame(isTwoPlayer, selectedDifficulty, isOnlineRef.current);
+            };
+            
+            const resumeGame = () => {
+                playUiSound();
+                if (isOnlineRef.current && !isHostRef.current) {
+                    setStatus('PLAYING');
+                } else {
+                    setCountdown(3);
+                    setStatus('COUNTDOWN');
+                }
+            };
+
+            const quitToMenu = () => {
+                playUiSound();
+                setIsExiting(true);
+                if (peerRef.current) {
+                    peerRef.current.destroy();
+                    peerRef.current = null;
+                }
+                if (quickPlayPeerRef.current) {
+                    quickPlayPeerRef.current.destroy();
+                    quickPlayPeerRef.current = null;
+                }
+                isOnlineRef.current = false;
+                isHostRef.current = false;
+                setTimeout(() => {
+                    setStatus('MENU');
+                    setMenuState('MAIN');
+                    setWinner(null);
+                    setIsExiting(false);
+                    setCountdown(null);
+                }, 300);
+            };
+
+            const formatTime = (seconds) => seconds.toString();
+
+            return (
+                <div className="fixed inset-0 bg-slate-900 flex items-center justify-center overflow-hidden font-sans select-none w-full h-full">
+                
+                {status !== 'MENU' && status !== 'INTRO' && (
+                    <div className="absolute top-0 left-0 w-full z-10 flex justify-between items-start px-8 py-6 bg-gradient-to-b from-black/60 to-transparent pointer-events-none">
+                    
+                    <div className="flex items-center gap-6">
+                        <div className="text-slate-300 font-bold tracking-widest text-sm hidden sm:block">SCORE</div>
+                        <div className="flex gap-4 text-white font-black text-4xl drop-shadow-lg tracking-wider items-center">
+                            <div className="flex flex-col items-center">
+                                <span className="text-xs text-blue-300 uppercase tracking-widest mb-1">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : "P1"}</span>
+                                <div className="text-blue-400 leading-none">{score.p1}</div>
+                            </div>
+                            <div className="text-slate-400 text-2xl">-</div>
+                            <div className="flex flex-col items-center">
+                                <span className="text-xs text-red-300 uppercase tracking-widest mb-1">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? "P2" : "CPU")}</span>
+                                <div className="text-red-400 leading-none">{score.p2}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className={`absolute left-1/2 top-4 transform -translate-x-1/2 flex flex-col items-center 
+                        ${timeLeft <= 10 ? 'text-red-500 animate-pulse' : 'text-yellow-400'}`}>
+                        <div className="text-4xl font-mono font-bold tracking-widest drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+                        {formatTime(timeLeft)}
+                        </div>
+                    </div>
+                    </div>
+                )}
+
+                <canvas
+                    ref={canvasRef}
+                    width={GAME_WIDTH}
+                    height={GAME_HEIGHT}
+                    className="block w-full h-full object-contain max-h-screen max-w-full shadow-2xl"
+                />
+
+                {status === 'INTRO' && (
+                    <div className="absolute inset-0 bg-black z-[100] flex items-center justify-center cursor-pointer">
+                    <h1 className="text-white text-4xl sm:text-6xl tracking-widest leading-loose font-bold" style={{ fontFamily: '"Press Start 2P", cursive' }}>
+                        {introText}
+                        <span className="animate-pulse">_</span>
+                    </h1>
+                    </div>
+                )}
+
+                {status === 'COUNTDOWN' && countdown !== null && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/20 z-50">
+                    <div className="text-9xl font-black text-white italic tracking-tighter drop-shadow-[0_10px_10px_rgba(0,0,0,0.8)] animate-pulse scale-150">
+                        {countdown > 0 ? countdown : "GO!"}
+                    </div>
+                    </div>
+                )}
+
+                {status === 'PLAYING' && engineRef.current.state.isGoal && !winner && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm z-20 animate-in fade-in zoom-in duration-300">
+                    <h2 className="text-9xl font-black text-white italic tracking-tighter drop-shadow-[0_10px_10px_rgba(0,0,0,0.8)] animate-pulse">
+                        GOAL!
+                    </h2>
+                    <p className="text-4xl font-bold text-white mt-4 uppercase drop-shadow-lg">
+                        {engineRef.current.state.lastScorer === 1 ? (
+                            <span className="text-blue-400">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : "Player 1"} Scores!</span>
+                        ) : (
+                            <span className="text-red-400">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? "Player 2" : "Computer")} Scores!</span>
+                        )}
+                    </p>
+                    </div>
+                )}
+
+                {status === 'MENU' && (
+                    <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center z-30 animate-in fade-in duration-700">
+                    <h1 className="text-7xl sm:text-9xl font-black text-white mb-2 tracking-tighter italic" style={{textShadow: "6px 6px 0px #3182ce"}}>
+                        KICK IT: 1v1
+                    </h1>
+                    <p className="text-blue-300 mb-12 text-xl uppercase tracking-widest font-bold">Physics Arcade Soccer</p>
+                    
+                    <div className="grid grid-cols-1 grid-rows-1 w-72">
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-4 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'MAIN' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 -translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="flex flex-col gap-4">
+                                <button onClick={() => { playUiSound(); setMenuState('DIFFICULTY_SELECT'); }} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-blue-800 text-lg">
+                                    1 Player (vs CPU)
+                                </button>
+                                <button onClick={() => startGame(true)} className="bg-red-600 hover:bg-red-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-red-800 text-lg">
+                                    2 Players (Local)
+                                </button>
+                                <button onClick={() => { playUiSound(); setMenuState('ONLINE_MENU'); }} className="bg-purple-600 hover:bg-purple-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-purple-800 text-lg">
+                                    Online Multiplayer
+                                </button>
+                            </div>
+                            <div className="mt-8 text-slate-500 text-sm grid grid-cols-2 gap-8 text-center bg-slate-800/50 p-4 rounded-lg">
+                                <div><p className="font-bold text-blue-400 mb-1 text-base">P1</p><p className="text-xs">WASD</p></div>
+                                <div><p className="font-bold text-red-400 mb-1 text-base">P2</p><p className="text-xs">ARROWS</p></div>
+                            </div>
+                        </div>
+
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'ONLINE_MENU' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">ONLINE MULTIPLAYER</div>
+                            <input 
+                                type="text" 
+                                placeholder="Your Name (Max 10)" 
+                                maxLength={10}
+                                value={playerName}
+                                onChange={(e) => setPlayerName(e.target.value)}
+                                className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-slate-700 focus:border-blue-500 focus:outline-none text-center mb-2 uppercase"
+                            />
+                            <button onClick={quickPlay} disabled={!playerName} className="bg-purple-600 hover:bg-purple-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-purple-800 text-lg">Quick Play</button>
+                            <button onClick={hostOnlineGame} disabled={!playerName} className="bg-green-600 hover:bg-green-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-green-800 text-lg">Host Private</button>
+                            <button onClick={() => { playUiSound(); setMenuState('JOINING'); }} disabled={!playerName} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-blue-800 text-lg">Join Private</button>
+                            <button onClick={() => { playUiSound(); setMenuState('MAIN'); }} className="mt-4 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">← Back</button>
+                        </div>
+
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'QUICK_PLAYING' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">QUICK PLAY</div>
+                            <div className="text-center text-yellow-400 font-bold animate-pulse mt-4 text-xl">{connectionStatus}</div>
+                            <button onClick={cancelQuickPlay} className="mt-8 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">Cancel</button>
+                        </div>
+
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'HOSTING' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">HOSTING GAME</div>
+                            <div className="bg-slate-800 p-4 rounded-lg text-center">
+                                <p className="text-slate-400 text-sm mb-2">Your Room ID:</p>
+                                <p className="text-white font-mono text-lg break-all select-all bg-slate-900 p-2 rounded border border-slate-700">{peerId || 'Generating...'}</p>
+                            </div>
+                            <div className="text-center text-yellow-400 font-bold animate-pulse mt-2">{connectionStatus}</div>
+                            <button onClick={cancelHost} className="mt-4 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">Cancel</button>
+                        </div>
+
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'JOINING' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">JOIN GAME</div>
+                            <input 
+                                type="text" 
+                                placeholder="Enter Room ID" 
+                                value={joinId}
+                                onChange={(e) => setJoinId(e.target.value)}
+                                className="bg-slate-800 text-white font-mono p-3 rounded-lg border border-slate-700 focus:border-blue-500 focus:outline-none text-center"
+                            />
+                            <button onClick={joinOnlineGame} disabled={!joinId} className="bg-green-600 hover:bg-green-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-3 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-green-800 text-lg mt-2">Connect</button>
+                            <div className="text-center text-yellow-400 font-bold mt-2">{connectionStatus}</div>
+                            <button onClick={cancelJoin} className="mt-4 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">← Back</button>
+                        </div>
+
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'DIFFICULTY_SELECT' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">SELECT DIFFICULTY</div>
+                            <button onClick={() => startGame(false, 'EASY')} className="bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-green-800 text-lg">EASY</button>
+                            <button onClick={() => startGame(false, 'MEDIUM')} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-3 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-yellow-800 text-lg">MEDIUM</button>
+                            <button onClick={() => startGame(false, 'HARD')} className="bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-orange-800 text-lg">HARD</button>
+                            <button onClick={() => startGame(false, 'INSANE')} className="bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-purple-800 text-lg">INSANE</button>
+                            <button onClick={() => { playUiSound(); setMenuState('MAIN'); }} className="mt-4 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">← Back</button>
+                        </div>
+                    </div>
+                    </div>
+                )}
+
+                {status === 'PAUSED' && (
+                    <div className={`absolute inset-0 bg-black/60 backdrop-blur-md flex flex-col items-center justify-center z-40 transition-opacity duration-300 ease-out ${isExiting ? 'opacity-0' : 'opacity-100'}`}>
+                    <h2 className="text-6xl font-black text-white mb-8 tracking-widest">PAUSED</h2>
+                    <div className="w-72 bg-slate-800/80 p-6 rounded-xl border border-slate-700 mb-8 flex flex-col items-center">
+                        <label className="text-blue-300 font-bold text-sm tracking-widest mb-3 w-full flex justify-between">
+                            <span>VOLUME</span><span>{volume}%</span>
+                        </label>
+                        <input type="range" min="0" max="100" value={volume} onChange={handleVolumeChange} className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-blue-500" />
+                    </div>
+                    <div className="flex flex-col gap-6 w-72">
+                        <button onClick={resumeGame} className="bg-green-600 hover:bg-green-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transition border-b-4 border-green-800 text-lg">Resume</button>
+                        {(!isOnlineRef.current || isHostRef.current) && (
+                            <button onClick={restartGame} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transition border-b-4 border-yellow-800 text-lg">Restart</button>
+                        )}
+                        <button onClick={quitToMenu} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transition border-b-4 border-slate-800 text-lg">Main Menu</button>
+                    </div>
+                    </div>
+                )}
+
+                {status === 'ENDED' && winner && (
+                    <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center z-50 animate-in fade-in duration-500">
+                    <h2 className="text-6xl sm:text-8xl font-black text-white mb-2 tracking-tighter italic" style={{textShadow: "4px 4px 0px #d69e2e"}}>MATCH ENDED</h2>
+                    <div className="text-5xl sm:text-6xl font-black text-white mb-12 tracking-wide drop-shadow-xl animate-bounce">
+                        {winner === 'Draw!' ? (
+                            <span className="text-gray-300">DRAW GAME!</span>
+                        ) : (
+                            <span className={winner.includes('Player 1') ? 'text-blue-400' : 'text-red-400'}>
+                                {isOnlineRef.current ? 
+                                    (winner.includes('Player 1') ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : (isHostRef.current ? (opponentName || "Player 2") : playerName)) + " WINS!"
+                                    : winner}
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex gap-12 items-center bg-slate-800/50 p-8 rounded-2xl border border-slate-700 mb-16 backdrop-blur-sm">
+                        <div className="flex flex-col items-center">
+                            <span className="text-blue-400 font-bold text-2xl mb-2 uppercase">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : "PLAYER 1"}</span>
+                            <span className="text-7xl font-black text-white">{score.p1}</span>
+                        </div>
+                        <div className="text-slate-500 text-5xl font-thin">vs</div>
+                        <div className="flex flex-col items-center">
+                            <span className="text-red-400 font-bold text-2xl mb-2 uppercase">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? "PLAYER 2" : "CPU")}</span>
+                            <span className="text-7xl font-black text-white">{score.p2}</span>
+                        </div>
+                    </div>
+                    <div className="flex flex-col gap-5 w-72">
+                        {(!isOnlineRef.current || isHostRef.current) && (
+                            <button onClick={restartGame} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform hover:scale-105 transition border-b-4 border-yellow-800 text-xl">Rematch</button>
+                        )}
+                        <button onClick={quitToMenu} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform hover:scale-105 transition border-b-4 border-slate-800 text-xl">Main Menu</button>
+                    </div>
+                    </div>
+                )}
+
+                {connectionError && (
+                    <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-[200] animate-in fade-in duration-300">
+                        <div className="bg-slate-800 p-8 rounded-2xl border-2 border-red-500 flex flex-col items-center max-w-md text-center">
+                            <h2 className="text-3xl font-black text-red-500 mb-4 tracking-widest">CONNECTION ERROR</h2>
+                            <p className="text-white text-lg mb-8">{connectionError}</p>
+                            <button onClick={() => setConnectionError('')} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-3 px-8 rounded-xl shadow-lg transition border-b-4 border-slate-800 text-lg">Dismiss</button>
+                        </div>
+                    </div>
+                )}
+                </div>
+            );
+        };
+
+        const App = () => {
+            return (
+                <div className="w-full h-full">
+                    <GameCanvas />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
