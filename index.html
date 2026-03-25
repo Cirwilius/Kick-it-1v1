@@ -974,10 +974,11 @@
                 ctx.fillStyle = bgGradient;
                 ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
 
-                const stripeWidth = GAME_WIDTH / 10;
-                for (let i = 0; i < GAME_WIDTH; i += stripeWidth) {
-                    ctx.fillStyle = (i / stripeWidth) % 2 === 0 ? COLORS.ground : COLORS.groundLight;
-                    ctx.fillRect(i, GROUND_Y, stripeWidth, GAME_HEIGHT - GROUND_Y);
+                const numStripes = 10;
+                const stripeWidth = GAME_WIDTH / numStripes;
+                for (let i = 0; i < numStripes; i++) {
+                    ctx.fillStyle = i % 2 === 0 ? COLORS.ground : COLORS.groundLight;
+                    ctx.fillRect(i * stripeWidth, GROUND_Y, stripeWidth, GAME_HEIGHT - GROUND_Y);
                 }
 
                 ctx.shadowBlur = 10;
