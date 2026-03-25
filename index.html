@@ -162,7 +162,7 @@
                 const restitution = Math.min(e1.restitution, e2.restitution);
                 let impulseScalar = -(1 + restitution) * velocityAlongNormal;
                 impulseScalar /= (1 / e1.mass + 1 / e2.mass);
-                impulseScalar *= 1.15; 
+                impulseScalar *= 1.15;
 
                 const impulse = {
                     x: impulseScalar * normal.x,
@@ -176,7 +176,6 @@
             }
         };
 
-        
         class AudioService {
             constructor() {
                 this.ctx = null;
@@ -290,7 +289,6 @@
 
         const audioService = new AudioService();
 
-        
         class GameEngine {
             constructor() {
                 this.defaultState = this.createInitialState();
@@ -343,7 +341,8 @@
                         mass: BALL_MASS,
                         restitution: BALL_ELASTICITY,
                         color: COLORS.ball
-                    }
+                    },
+                    kickoffFrames: 60
                 };
             }
 
@@ -356,10 +355,13 @@
                 this.state.ball.vel = { x: 0, y: 0 };
                 this.state.isGoal = false;
                 this.state.lastScorer = 0;
+                this.state.kickoffFrames = 60;
             }
 
             update(input, isTwoPlayerMode, onSound) {
                 if (this.state.isGoal || this.state.winner) return;
+
+                if (this.state.kickoffFrames > 0) this.state.kickoffFrames--;
 
                 this.state.timeLeft -= 1 / 60;
                 if (this.state.timeLeft < 0) this.state.timeLeft = 0;
@@ -421,14 +423,18 @@
 
                 ai.speed = PLAYER_SPEED * speedMult;
 
-                const isBallLeftOfAI = ball.pos.x < ai.pos.x; 
+                const isBallLeftOfAI = ball.pos.x < ai.pos.x;
                 const ballMovingToOwnGoal = ball.vel.x > 1;
                 const opponentHasPossession = distance(opponent.pos, ball.pos) < 140;
 
-                let targetX = ball.pos.x + 40 - aggression; 
-                
-                if (ball.pos.x < GAME_WIDTH * 0.6 && (opponentHasPossession || ballMovingToOwnGoal)) {
-                   targetX = ball.pos.x + defenseCushion + (ball.vel.x * 15); 
+                let targetX = ball.pos.x + 40 - aggression;
+
+                if (this.state.kickoffFrames > 0) {
+                    targetX = ball.pos.x;
+                    ai.speed = PLAYER_SPEED * 1.5;
+                    deadzone = 2;
+                } else if (ball.pos.x < GAME_WIDTH * 0.6 && (opponentHasPossession || ballMovingToOwnGoal)) {
+                   targetX = ball.pos.x + defenseCushion + (ball.vel.x * 15);
                 } else if (ballMovingToOwnGoal && ball.pos.x > GAME_WIDTH * 0.6) {
                    targetX = ball.pos.x + 25;
                 }
@@ -471,6 +477,10 @@
                                 onSound('JUMP');
                             }
                         }
+                    } else if (ball.vel.x > 8 && ball.pos.y < GROUND_Y - 40 && dx > 0 && dx < 180) {
+                        ai.vel.y = -ai.jumpForce;
+                        ai.isGrounded = false;
+                        onSound('JUMP');
                     } else if (Math.abs(dx) < 60 * jumpSensitivity && ball.pos.y < ai.pos.y - 60) {
                          if (ball.vel.y > -5) {
                             ai.vel.y = -ai.jumpForce;
@@ -627,11 +637,17 @@
             const [connectionStatus, setConnectionStatus] = useState('');
             const [connectionError, setConnectionError] = useState('');
             const [playerName, setPlayerName] = useState(() => localStorage.getItem('kickItPlayerName') || '');
+            const [player2Name, setPlayer2Name] = useState(() => localStorage.getItem('kickItPlayer2Name') || '');
             const [opponentName, setOpponentName] = useState('');
+            const [pauseCountdown, setPauseCountdown] = useState(null);
 
             useEffect(() => {
                 localStorage.setItem('kickItPlayerName', playerName);
             }, [playerName]);
+
+            useEffect(() => {
+                localStorage.setItem('kickItPlayer2Name', player2Name);
+            }, [player2Name]);
 
             const peerRef = useRef(null);
             const connRef = useRef(null);
@@ -640,6 +656,7 @@
             const isHostRef = useRef(false);
             const isOnlineRef = useRef(false);
             const clientInputRef = useRef({ left: false, right: false, jump: false });
+            const minimizedByMeRef = useRef(false);
 
             const latestScore = useRef(score);
             const latestStatus = useRef(status);
@@ -670,7 +687,8 @@
 
                 typeInterval = setInterval(() => {
                     if (charIndex < FULL_INTRO_TEXT.length) {
-                        setIntroText(prev => prev + FULL_INTRO_TEXT.charAt(charIndex));
+                        const capturedIndex = charIndex;
+                        setIntroText(FULL_INTRO_TEXT.substring(0, capturedIndex + 1));
                         audioService.play('TYPE');
                         charIndex++;
                     } else {
@@ -710,11 +728,18 @@
                     activeKeys.current.add(e.key);
                     if (e.key === InputKey.ESCAPE) {
                         if (status === 'PLAYING') {
-                            setStatus('PAUSED');
-                        } else if (status === 'PAUSED') {
                             if (isOnlineRef.current && !isHostRef.current) {
-                                setStatus('PLAYING');
+                                if (connRef.current && connRef.current.open) {
+                                    connRef.current.send({ type: 'PAUSE_REQUEST' });
+                                }
                             } else {
+                                setStatus('PAUSED');
+                                if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
+                                    connRef.current.send({ type: 'PAUSE' });
+                                }
+                            }
+                        } else if (status === 'PAUSED') {
+                            if (!isOnlineRef.current) {
                                 setCountdown(3);
                                 setStatus('COUNTDOWN');
                             }
@@ -731,6 +756,62 @@
             }, [status]);
 
             useEffect(() => {
+                let gpStartPrev0 = false;
+                let gpStartPrev1 = false;
+                const gpInterval = setInterval(() => {
+                    const gp0 = readGamepad(0);
+                    const gp1 = readGamepad(1);
+                    const s0 = gp0.start && !gpStartPrev0;
+                    const s1 = gp1.start && !gpStartPrev1;
+                    gpStartPrev0 = gp0.start;
+                    gpStartPrev1 = gp1.start;
+                    if (s0 || s1) {
+                        const cur = latestStatus.current;
+                        if (cur === 'PLAYING') {
+                            if (isOnlineRef.current && !isHostRef.current) {
+                                if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE_REQUEST' });
+                            } else {
+                                setStatus('PAUSED');
+                                if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
+                                    connRef.current.send({ type: 'PAUSE' });
+                                }
+                            }
+                        } else if (cur === 'PAUSED' && !isOnlineRef.current) {
+                            setCountdown(3);
+                            setStatus('COUNTDOWN');
+                        }
+                    }
+                }, 100);
+                return () => clearInterval(gpInterval);
+            }, []);
+
+            useEffect(() => {
+                const triggerPause = () => {
+                    if (latestStatus.current !== 'PLAYING') return;
+                    minimizedByMeRef.current = true;
+                    if (isOnlineRef.current && !isHostRef.current) {
+                        if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE_REQUEST' });
+                    } else {
+                        setStatus('PAUSED');
+                        if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
+                            connRef.current.send({ type: 'PAUSE' });
+                        }
+                    }
+                };
+                const onFocus = () => { minimizedByMeRef.current = false; };
+                const onVisibility = () => { if (document.hidden) triggerPause(); else minimizedByMeRef.current = false; };
+                const onBlur = () => triggerPause();
+                document.addEventListener('visibilitychange', onVisibility);
+                window.addEventListener('blur', onBlur);
+                window.addEventListener('focus', onFocus);
+                return () => {
+                    document.removeEventListener('visibilitychange', onVisibility);
+                    window.removeEventListener('blur', onBlur);
+                    window.removeEventListener('focus', onFocus);
+                };
+            }, []);
+
+            useEffect(() => {
                 if (status === 'COUNTDOWN' && countdown !== null) {
                     if (countdown > 0) {
                         audioService.play('UI_SELECT');
@@ -744,16 +825,65 @@
                 }
             }, [status, countdown]);
 
+            useEffect(() => {
+                if (status === 'PAUSED' && isOnlineRef.current) {
+                    setPauseCountdown(15);
+                } else {
+                    setPauseCountdown(null);
+                }
+            }, [status]);
+
+            useEffect(() => {
+                if (pauseCountdown === null) return;
+                if (pauseCountdown <= 0) {
+                    setPauseCountdown(null);
+                    if (isOnlineRef.current) {
+                        if (minimizedByMeRef.current && (document.hidden || !document.hasFocus())) {
+                            minimizedByMeRef.current = false;
+                            if (connRef.current && connRef.current.open) {
+                                connRef.current.send({ type: 'FORFEIT' });
+                            }
+                            if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
+                            isOnlineRef.current = false;
+                            isHostRef.current = false;
+                            setStatus('MENU');
+                            setMenuState('MAIN');
+                            setWinner(null);
+                            setCountdown(null);
+                        } else if (isHostRef.current) {
+                            minimizedByMeRef.current = false;
+                            setCountdown(3);
+                            setStatus('COUNTDOWN');
+                        }
+                    }
+                    return;
+                }
+                const t = setTimeout(() => setPauseCountdown(prev => prev !== null ? prev - 1 : null), 1000);
+                return () => clearTimeout(t);
+            }, [pauseCountdown]);
+
+            const readGamepad = (index) => {
+                const gp = navigator.getGamepads ? navigator.getGamepads()[index] : null;
+                if (!gp) return { left: false, right: false, jump: false, start: false };
+                const axisX = gp.axes[0] || 0;
+                const left  = axisX < -0.4 || (gp.buttons[14] && gp.buttons[14].pressed);
+                const right = axisX >  0.4 || (gp.buttons[15] && gp.buttons[15].pressed);
+                const jump  = (gp.buttons[0] && gp.buttons[0].pressed) || (gp.buttons[2] && gp.buttons[2].pressed) || (gp.buttons[1] && gp.buttons[1].pressed);
+                const start = (gp.buttons[9] && gp.buttons[9].pressed) || (gp.buttons[7] && gp.buttons[7].pressed);
+                return { left, right, jump, start };
+            };
+
             const getInputState = (is2P) => {
                 const keys = activeKeys.current;
-                const p1Left = keys.has(InputKey.A) || (!is2P && keys.has(InputKey.LEFT));
-                const p1Right = keys.has(InputKey.D) || (!is2P && keys.has(InputKey.RIGHT));
-                const p1Jump = keys.has(InputKey.W) || (!is2P && keys.has(InputKey.UP));
-
-                const p2Left = is2P && keys.has(InputKey.LEFT);
-                const p2Right = is2P && keys.has(InputKey.RIGHT);
-                const p2Jump = is2P && keys.has(InputKey.UP);
-
+                const isOnline = isOnlineRef.current;
+                const gp0 = readGamepad(0);
+                const gp1 = readGamepad(1);
+                const p1Left  = keys.has(InputKey.A) || (!is2P && keys.has(InputKey.LEFT)) || (isOnline && keys.has(InputKey.LEFT)) || gp0.left;
+                const p1Right = keys.has(InputKey.D) || (!is2P && keys.has(InputKey.RIGHT)) || (isOnline && keys.has(InputKey.RIGHT)) || gp0.right;
+                const p1Jump  = keys.has(InputKey.W) || (!is2P && keys.has(InputKey.UP)) || (isOnline && keys.has(InputKey.UP)) || gp0.jump;
+                const p2Left  = (is2P && keys.has(InputKey.LEFT)) || (is2P && gp1.left);
+                const p2Right = (is2P && keys.has(InputKey.RIGHT)) || (is2P && gp1.right);
+                const p2Jump  = (is2P && keys.has(InputKey.UP)) || (is2P && gp1.jump);
                 return {
                     p1: { left: p1Left, right: p1Right, jump: p1Jump },
                     p2: { left: p2Left, right: p2Right, jump: p2Jump }
@@ -762,10 +892,11 @@
 
             const getClientInputState = () => {
                 const keys = activeKeys.current;
+                const gp0 = readGamepad(0);
                 return {
-                    left: keys.has(InputKey.A) || keys.has(InputKey.LEFT),
-                    right: keys.has(InputKey.D) || keys.has(InputKey.RIGHT),
-                    jump: keys.has(InputKey.W) || keys.has(InputKey.UP)
+                    left:  keys.has(InputKey.A) || keys.has(InputKey.LEFT)  || gp0.left,
+                    right: keys.has(InputKey.D) || keys.has(InputKey.RIGHT) || gp0.right,
+                    jump:  keys.has(InputKey.W) || keys.has(InputKey.UP)    || gp0.jump
                 };
             };
 
@@ -895,11 +1026,14 @@
                 ctx.arc(ball.pos.x, ball.pos.y, ball.radius * 0.6, 0, Math.PI * 2);
                 ctx.stroke();
                 
+                const p1Name = isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "P1")) : (playerName || "P1");
+                const p2Name = isOnlineRef.current ? (isHostRef.current ? (opponentName || "P2") : playerName) : (isTwoPlayer ? (player2Name || "P2") : "CPU");
+
                 ctx.fillStyle = "white";
                 ctx.font = "bold 14px sans-serif";
                 ctx.textAlign = "center";
-                ctx.fillText(isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "P1")) : "P1", player1.pos.x, player1.pos.y - player1.radius - 15);
-                ctx.fillText(isOnlineRef.current ? (isHostRef.current ? (opponentName || "P2") : playerName) : (isTwoPlayer ? "P2" : "CPU"), player2.pos.x, player2.pos.y - player2.radius - 15);
+                ctx.fillText(p1Name.toUpperCase(), player1.pos.x, player1.pos.y - player1.radius - 15);
+                ctx.fillText(p2Name.toUpperCase(), player2.pos.x, player2.pos.y - player2.radius - 15);
             };
 
             const gameLoop = useCallback((time) => {
@@ -1034,10 +1168,12 @@
             };
 
             const setupConnection = (conn, isHost) => {
+                let opponentLeaving = false;
+
                 const initConn = () => {
                     isHostRef.current = isHost;
                     isOnlineRef.current = true;
-                    conn.send({ type: 'SET_NAME', name: playerName });
+                    conn.send({ type: 'SET_NAME', name: playerName.trim() || 'Player' });
                     
                     if (isHost) {
                         startGame(true, 'MEDIUM', true);
@@ -1068,12 +1204,39 @@
                         setOpponentName(data.name);
                         return;
                     }
+                    if (data.type === 'LEAVING') {
+                        opponentLeaving = true;
+                        return;
+                    }
                     if (isHost) {
                         if (data.type === 'INPUT') {
                             clientInputRef.current = data.input;
+                        } else if (data.type === 'PAUSE_REQUEST') {
+                            if (latestStatus.current === 'PLAYING') {
+                                setStatus('PAUSED');
+                            }
+                        } else if (data.type === 'RESUME_REQUEST') {
+                            if (latestStatus.current === 'PAUSED') {
+                                setCountdown(3);
+                                setStatus('COUNTDOWN');
+                            }
+                        } else if (data.type === 'FORFEIT') {
+                            setConnectionError('Your opponent forfeited the match.');
+                            setTimeout(() => {
+                                setConnectionError('');
+                                setStatus('MENU');
+                                setMenuState('MAIN');
+                                setWinner(null);
+                                setCountdown(null);
+                                isOnlineRef.current = false;
+                                isHostRef.current = false;
+                                if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
+                            }, 3000);
                         }
                     } else {
-                        if (data.type === 'START') {
+                        if (data.type === 'PAUSE') {
+                            setStatus('PAUSED');
+                        } else if (data.type === 'START') {
                             startGame(true, 'MEDIUM', true);
                         } else if (data.type === 'STATE') {
                             engineRef.current.state = data.state;
@@ -1100,11 +1263,18 @@
                 });
 
                 conn.on('close', () => {
-                    setConnectionError('Connection lost');
+                    if (opponentLeaving) return;
+                    const wasPlaying = latestStatus.current === 'PLAYING' || latestStatus.current === 'PAUSED' || latestStatus.current === 'COUNTDOWN';
+                    setConnectionError(wasPlaying ? 'Your opponent left the match.' : 'Connection lost');
                     setTimeout(() => {
-                        quitToMenu();
                         setConnectionError('');
-                    }, 2000);
+                        setStatus('MENU');
+                        setMenuState('MAIN');
+                        setWinner(null);
+                        setCountdown(null);
+                        isOnlineRef.current = false;
+                        isHostRef.current = false;
+                    }, 3000);
                 });
 
                 conn.on('error', (err) => {
@@ -1130,6 +1300,7 @@
 
             const hostOnlineGame = () => {
                 playUiSound();
+                if (!playerName.trim()) setPlayerName('Player');
                 setMenuState('HOSTING');
                 setConnectionStatus('Creating peer...');
                 const peer = new Peer(peerConfig);
@@ -1162,6 +1333,7 @@
 
             const joinOnlineGame = () => {
                 playUiSound();
+                if (!playerName.trim()) setPlayerName('Player');
                 if (!joinId) return;
                 setConnectionStatus('Connecting...');
                 const peer = new Peer(peerConfig);
@@ -1200,6 +1372,7 @@
 
             const quickPlay = () => {
                 playUiSound();
+                if (!playerName.trim()) setPlayerName('Player');
                 setMenuState('QUICK_PLAYING');
                 setConnectionStatus('Searching for match...');
                 quickPlaySlotRef.current = 1;
@@ -1309,8 +1482,15 @@
             
             const resumeGame = () => {
                 playUiSound();
-                if (isOnlineRef.current && !isHostRef.current) {
-                    setStatus('PLAYING');
+                if (isOnlineRef.current) {
+                    if (isHostRef.current) {
+                        setCountdown(3);
+                        setStatus('COUNTDOWN');
+                    } else {
+                        if (connRef.current && connRef.current.open) {
+                            connRef.current.send({ type: 'RESUME_REQUEST' });
+                        }
+                    }
                 } else {
                     setCountdown(3);
                     setStatus('COUNTDOWN');
@@ -1320,6 +1500,9 @@
             const quitToMenu = () => {
                 playUiSound();
                 setIsExiting(true);
+                if (connRef.current && connRef.current.open) {
+                    try { connRef.current.send({ type: 'LEAVING' }); } catch(e) {}
+                }
                 if (peerRef.current) {
                     peerRef.current.destroy();
                     peerRef.current = null;
@@ -1351,12 +1534,12 @@
                         <div className="text-slate-300 font-bold tracking-widest text-sm hidden sm:block">SCORE</div>
                         <div className="flex gap-4 text-white font-black text-4xl drop-shadow-lg tracking-wider items-center">
                             <div className="flex flex-col items-center">
-                                <span className="text-xs text-blue-300 uppercase tracking-widest mb-1">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : "P1"}</span>
+                                <span className="text-xs text-blue-300 uppercase tracking-widest mb-1">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : (playerName || "P1")}</span>
                                 <div className="text-blue-400 leading-none">{score.p1}</div>
                             </div>
                             <div className="text-slate-400 text-2xl">-</div>
                             <div className="flex flex-col items-center">
-                                <span className="text-xs text-red-300 uppercase tracking-widest mb-1">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? "P2" : "CPU")}</span>
+                                <span className="text-xs text-red-300 uppercase tracking-widest mb-1">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? (player2Name || "P2") : "CPU")}</span>
                                 <div className="text-red-400 leading-none">{score.p2}</div>
                             </div>
                         </div>
@@ -1402,9 +1585,9 @@
                     </h2>
                     <p className="text-4xl font-bold text-white mt-4 uppercase drop-shadow-lg">
                         {engineRef.current.state.lastScorer === 1 ? (
-                            <span className="text-blue-400">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : "Player 1"} Scores!</span>
+                            <span className="text-blue-400 uppercase">{isOnlineRef.current ? (isHostRef.current ? playerName : (opponentName || "Player 1")) : (playerName || "Player 1")} SCORES!</span>
                         ) : (
-                            <span className="text-red-400">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? "Player 2" : "Computer")} Scores!</span>
+                            <span className="text-red-400 uppercase">{isOnlineRef.current ? (isHostRef.current ? (opponentName || "Player 2") : playerName) : (isTwoPlayer ? (player2Name || "Player 2") : "COMPUTER")} SCORES!</span>
                         )}
                     </p>
                     </div>
@@ -1421,10 +1604,18 @@
                         <div className={`col-start-1 row-start-1 flex flex-col gap-4 w-full transition-all duration-300 ease-out transform
                             ${menuState === 'MAIN' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 -translate-x-12 scale-95 pointer-events-none'}`}>
                             <div className="flex flex-col gap-4">
+                                <input
+                                    type="text"
+                                    placeholder="Your Name"
+                                    maxLength={10}
+                                    value={playerName}
+                                    onChange={(e) => setPlayerName(e.target.value)}
+                                    className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-slate-700 focus:border-blue-500 focus:outline-none text-center uppercase w-full"
+                                />
                                 <button onClick={() => { playUiSound(); setMenuState('DIFFICULTY_SELECT'); }} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-blue-800 text-lg">
                                     1 Player (vs CPU)
                                 </button>
-                                <button onClick={() => startGame(true)} className="bg-red-600 hover:bg-red-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-red-800 text-lg">
+                                <button onClick={() => { playUiSound(); setMenuState('TWO_PLAYER_SETUP'); }} className="bg-red-600 hover:bg-red-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-red-800 text-lg">
                                     2 Players (Local)
                                 </button>
                                 <button onClick={() => { playUiSound(); setMenuState('ONLINE_MENU'); }} className="bg-purple-600 hover:bg-purple-500 text-white font-bold py-5 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-purple-800 text-lg">
@@ -1437,33 +1628,88 @@
                             </div>
                         </div>
 
+                        <div className={`col-start-1 row-start-1 flex flex-col gap-4 w-full transition-all duration-300 ease-out transform
+                            ${menuState === 'TWO_PLAYER_SETUP' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
+                            <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">2 PLAYERS — LOCAL</div>
+                            <div className="flex flex-col gap-3">
+                                <div className="flex flex-col gap-1">
+                                    <label className="text-blue-400 font-bold text-xs tracking-widest text-center">PLAYER 1</label>
+                                    <input
+                                        type="text"
+                                        placeholder="P1 Name"
+                                        maxLength={10}
+                                        value={playerName}
+                                        onChange={(e) => setPlayerName(e.target.value)}
+                                        className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-blue-700 focus:border-blue-400 focus:outline-none text-center uppercase w-full"
+                                    />
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <label className="text-red-400 font-bold text-xs tracking-widest text-center">PLAYER 2</label>
+                                    <input
+                                        type="text"
+                                        placeholder="P2 Name"
+                                        maxLength={10}
+                                        value={player2Name}
+                                        onChange={(e) => setPlayer2Name(e.target.value)}
+                                        className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-red-700 focus:border-red-400 focus:outline-none text-center uppercase w-full"
+                                    />
+                                </div>
+                            </div>
+                            <button onClick={() => startGame(true)} className="bg-red-600 hover:bg-red-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-red-800 text-lg mt-2">
+                                ¡Kick Off!
+                            </button>
+                            <button onClick={() => { playUiSound(); setMenuState('MAIN'); }} className="mt-2 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">← Back</button>
+                        </div>
+
                         <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
                             ${menuState === 'ONLINE_MENU' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
                             <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">ONLINE MULTIPLAYER</div>
-                            <input 
-                                type="text" 
-                                placeholder="Your Name (Max 10)" 
+                            <input
+                                type="text"
+                                placeholder="Your Name"
                                 maxLength={10}
                                 value={playerName}
                                 onChange={(e) => setPlayerName(e.target.value)}
-                                className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-slate-700 focus:border-blue-500 focus:outline-none text-center mb-2 uppercase"
+                                className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-purple-700 focus:border-purple-400 focus:outline-none text-center uppercase w-full"
                             />
-                            <button onClick={quickPlay} disabled={!playerName} className="bg-purple-600 hover:bg-purple-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-purple-800 text-lg">Quick Play</button>
-                            <button onClick={hostOnlineGame} disabled={!playerName} className="bg-green-600 hover:bg-green-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-green-800 text-lg">Host Private</button>
-                            <button onClick={() => { playUiSound(); setMenuState('JOINING'); }} disabled={!playerName} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:text-slate-400 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-blue-800 text-lg">Join Private</button>
+                            <button onClick={quickPlay} className="bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-purple-800 text-lg">Quick Play</button>
+                            <button onClick={hostOnlineGame} className="bg-green-600 hover:bg-green-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-green-800 text-lg">Host Private</button>
+                            <button onClick={() => { playUiSound(); setMenuState('JOINING'); }} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-6 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-blue-800 text-lg">Join Private</button>
                             <button onClick={() => { playUiSound(); setMenuState('MAIN'); }} className="mt-4 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">← Back</button>
                         </div>
 
                         <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
                             ${menuState === 'QUICK_PLAYING' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
                             <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">QUICK PLAY</div>
-                            <div className="text-center text-yellow-400 font-bold animate-pulse mt-4 text-xl">{connectionStatus}</div>
-                            <button onClick={cancelQuickPlay} className="mt-8 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">Cancel</button>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-purple-400 font-bold text-xs tracking-widest text-center">YOUR NAME</label>
+                                <input
+                                    type="text"
+                                    placeholder="Player"
+                                    maxLength={10}
+                                    value={playerName}
+                                    onChange={(e) => setPlayerName(e.target.value)}
+                                    className="bg-slate-800 text-white font-bold p-2 rounded-lg border border-purple-700 focus:border-purple-400 focus:outline-none text-center uppercase w-full text-sm"
+                                />
+                            </div>
+                            <div className="text-center text-yellow-400 font-bold animate-pulse mt-2 text-xl">{connectionStatus}</div>
+                            <button onClick={cancelQuickPlay} className="mt-6 text-slate-400 hover:text-white font-bold text-sm uppercase tracking-wider py-2">Cancel</button>
                         </div>
 
                         <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
                             ${menuState === 'HOSTING' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
                             <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">HOSTING GAME</div>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-green-400 font-bold text-xs tracking-widest text-center">YOUR NAME</label>
+                                <input
+                                    type="text"
+                                    placeholder="Player"
+                                    maxLength={10}
+                                    value={playerName}
+                                    onChange={(e) => setPlayerName(e.target.value)}
+                                    className="bg-slate-800 text-white font-bold p-2 rounded-lg border border-green-700 focus:border-green-400 focus:outline-none text-center uppercase w-full text-sm"
+                                />
+                            </div>
                             <div className="bg-slate-800 p-4 rounded-lg text-center">
                                 <p className="text-slate-400 text-sm mb-2">Your Room ID:</p>
                                 <p className="text-white font-mono text-lg break-all select-all bg-slate-900 p-2 rounded border border-slate-700">{peerId || 'Generating...'}</p>
@@ -1475,6 +1721,17 @@
                         <div className={`col-start-1 row-start-1 flex flex-col gap-3 w-full transition-all duration-300 ease-out transform
                             ${menuState === 'JOINING' ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'}`}>
                             <div className="text-center text-white font-bold mb-2 tracking-widest text-sm text-slate-400">JOIN GAME</div>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-blue-400 font-bold text-xs tracking-widest text-center">YOUR NAME</label>
+                                <input
+                                    type="text"
+                                    placeholder="Player"
+                                    maxLength={10}
+                                    value={playerName}
+                                    onChange={(e) => setPlayerName(e.target.value)}
+                                    className="bg-slate-800 text-white font-bold p-2 rounded-lg border border-blue-700 focus:border-blue-400 focus:outline-none text-center uppercase w-full text-sm"
+                                />
+                            </div>
                             <input 
                                 type="text" 
                                 placeholder="Enter Room ID" 
@@ -1502,7 +1759,13 @@
 
                 {status === 'PAUSED' && (
                     <div className={`absolute inset-0 bg-black/60 backdrop-blur-md flex flex-col items-center justify-center z-40 transition-opacity duration-300 ease-out ${isExiting ? 'opacity-0' : 'opacity-100'}`}>
-                    <h2 className="text-6xl font-black text-white mb-8 tracking-widest">PAUSED</h2>
+                    <h2 className="text-6xl font-black text-white mb-4 tracking-widest">PAUSED</h2>
+                    {isOnlineRef.current && pauseCountdown !== null && (
+                        <div className="text-7xl font-black text-yellow-400 italic tracking-tighter drop-shadow-[0_6px_8px_rgba(0,0,0,0.8)] animate-pulse mb-6">
+                            {pauseCountdown}
+                        </div>
+                    )}
+                    {(!isOnlineRef.current || pauseCountdown === null) && <div className="mb-8" />}
                     <div className="w-72 bg-slate-800/80 p-6 rounded-xl border border-slate-700 mb-8 flex flex-col items-center">
                         <label className="text-blue-300 font-bold text-sm tracking-widest mb-3 w-full flex justify-between">
                             <span>VOLUME</span><span>{volume}%</span>
@@ -1554,12 +1817,12 @@
                 )}
 
                 {connectionError && (
-                    <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-[200] animate-in fade-in duration-300">
-                        <div className="bg-slate-800 p-8 rounded-2xl border-2 border-red-500 flex flex-col items-center max-w-md text-center">
-                            <h2 className="text-3xl font-black text-red-500 mb-4 tracking-widest">CONNECTION ERROR</h2>
-                            <p className="text-white text-lg mb-8">{connectionError}</p>
-                            <button onClick={() => setConnectionError('')} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-3 px-8 rounded-xl shadow-lg transition border-b-4 border-slate-800 text-lg">Dismiss</button>
-                        </div>
+                    <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center z-[200] animate-in fade-in duration-300">
+                        <h2 className="text-4xl sm:text-5xl font-black text-red-500 mb-6 tracking-tighter italic uppercase" style={{textShadow: "4px 4px 0px #742a2a"}}>
+                            {connectionError.includes('left') ? 'OPPONENT LEFT' : 'CONNECTION ERROR'}
+                        </h2>
+                        <p className="text-white font-black text-xl uppercase tracking-widest mb-12">{connectionError.includes('left') ? 'Your opponent abandoned the match.' : connectionError}</p>
+                        <button onClick={() => setConnectionError('')} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-4 px-8 rounded-xl shadow-xl transform hover:scale-105 transition border-b-4 border-slate-800 text-lg uppercase tracking-wider">Dismiss</button>
                     </div>
                 )}
                 </div>
