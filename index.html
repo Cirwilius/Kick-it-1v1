@@ -335,7 +335,7 @@
                         jumpForce: PLAYER_JUMP
                     },
                     ball: {
-                        pos: { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 3 },
+                        pos: { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 6 },
                         vel: { x: 0, y: 0 },
                         radius: BALL_RADIUS,
                         mass: BALL_MASS,
@@ -351,7 +351,7 @@
                 this.state.player1.vel = { x: 0, y: 0 };
                 this.state.player2.pos = { x: GAME_WIDTH * 0.75, y: GROUND_Y - PLAYER_RADIUS };
                 this.state.player2.vel = { x: 0, y: 0 };
-                this.state.ball.pos = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 3 };
+                this.state.ball.pos = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 6 };
                 this.state.ball.vel = { x: 0, y: 0 };
                 this.state.isGoal = false;
                 this.state.lastScorer = 0;
@@ -431,8 +431,6 @@
 
                 if (this.state.kickoffFrames > 0) {
                     targetX = ball.pos.x;
-                    ai.speed = PLAYER_SPEED * 1.5;
-                    deadzone = 2;
                 } else if (ball.pos.x < GAME_WIDTH * 0.6 && (opponentHasPossession || ballMovingToOwnGoal)) {
                    targetX = ball.pos.x + defenseCushion + (ball.vel.x * 15);
                 } else if (ballMovingToOwnGoal && ball.pos.x > GAME_WIDTH * 0.6) {
@@ -627,6 +625,9 @@
             const [score, setScore] = useState({ p1: 0, p2: 0 });
             const [timeLeft, setTimeLeft] = useState(GAME_DURATION);
             const [winner, setWinner] = useState(null);
+            const [rematchRequested, setRematchRequested] = useState(false);
+            const [opponentRematchRequested, setOpponentRematchRequested] = useState(false);
+            const rematchRequestedRef = useRef(false);
             const [volume, setVolume] = useState(50);
             const [isExiting, setIsExiting] = useState(false);
             const [countdown, setCountdown] = useState(null);
@@ -640,6 +641,10 @@
             const [player2Name, setPlayer2Name] = useState(() => localStorage.getItem('kickItPlayer2Name') || '');
             const [opponentName, setOpponentName] = useState('');
             const [pauseCountdown, setPauseCountdown] = useState(null);
+            const [pausesLeft, setPausesLeft] = useState(3);
+            const pausesLeftRef = useRef(3);
+            const goalDoneReceivedRef = useRef(false);
+            const goalResetTimeoutRef = useRef(null);
 
             useEffect(() => {
                 localStorage.setItem('kickItPlayerName', playerName);
@@ -666,7 +671,9 @@
             useEffect(() => { latestScore.current = score; }, [score]);
             useEffect(() => { latestStatus.current = status; }, [status]);
             useEffect(() => { latestWinner.current = winner; }, [winner]);
+            useEffect(() => { rematchRequestedRef.current = rematchRequested; }, [rematchRequested]);
             useEffect(() => { latestMenuState.current = menuState; }, [menuState]);
+            useEffect(() => { pausesLeftRef.current = pausesLeft; }, [pausesLeft]);
 
             const [introText, setIntroText] = useState("");
             const FULL_INTRO_TEXT = "CIRWILIUS";
@@ -684,21 +691,34 @@
                 let charIndex = 0;
                 let typeInterval = null;
                 let endTimeout = null;
+                let isMounted = true;
 
-                typeInterval = setInterval(() => {
-                    if (charIndex < FULL_INTRO_TEXT.length) {
-                        const capturedIndex = charIndex;
-                        setIntroText(FULL_INTRO_TEXT.substring(0, capturedIndex + 1));
-                        audioService.play('TYPE');
-                        charIndex++;
-                    } else {
-                        clearInterval(typeInterval);
-                        endTimeout = setTimeout(() => {
-                            audioService.play('INTRO_END');
-                            setStatus('MENU');
-                        }, 1000);
-                    }
-                }, 150);
+                const startIntro = () => {
+                    if (!isMounted) return;
+                    typeInterval = setInterval(() => {
+                        if (charIndex < FULL_INTRO_TEXT.length) {
+                            const capturedIndex = charIndex;
+                            setIntroText(FULL_INTRO_TEXT.substring(0, capturedIndex + 1));
+                            audioService.play('TYPE');
+                            charIndex++;
+                        } else {
+                            clearInterval(typeInterval);
+                            endTimeout = setTimeout(() => {
+                                audioService.play('INTRO_END');
+                                setStatus('MENU');
+                            }, 1000);
+                        }
+                    }, 150);
+                };
+
+                let fontTimeout = setTimeout(() => {
+                    if (!typeInterval) startIntro();
+                }, 1000);
+
+                document.fonts.ready.then(() => {
+                    clearTimeout(fontTimeout);
+                    if (!typeInterval) startIntro();
+                });
 
                 const skipIntro = () => {
                     clearInterval(typeInterval);
@@ -711,8 +731,10 @@
                 window.addEventListener('click', skipIntro);
                 window.addEventListener('touchstart', skipIntro);
                 return () => {
+                    isMounted = false;
                     clearInterval(typeInterval);
                     clearTimeout(endTimeout);
+                    clearTimeout(fontTimeout);
                     window.removeEventListener('keydown', skipIntro);
                     window.removeEventListener('click', skipIntro);
                     window.removeEventListener('touchstart', skipIntro);
@@ -728,15 +750,21 @@
                     activeKeys.current.add(e.key);
                     if (e.key === InputKey.ESCAPE) {
                         if (status === 'PLAYING') {
-                            if (isOnlineRef.current && !isHostRef.current) {
-                                if (connRef.current && connRef.current.open) {
-                                    connRef.current.send({ type: 'PAUSE_REQUEST' });
+                            if (isOnlineRef.current) {
+                                if (pausesLeftRef.current <= 0) return;
+                                setPausesLeft(p => p - 1);
+                                if (!isHostRef.current) {
+                                    if (connRef.current && connRef.current.open) {
+                                        connRef.current.send({ type: 'PAUSE_REQUEST' });
+                                    }
+                                } else {
+                                    setStatus('PAUSED');
+                                    if (connRef.current && connRef.current.open) {
+                                        connRef.current.send({ type: 'PAUSE' });
+                                    }
                                 }
                             } else {
                                 setStatus('PAUSED');
-                                if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
-                                    connRef.current.send({ type: 'PAUSE' });
-                                }
                             }
                         } else if (status === 'PAUSED') {
                             if (!isOnlineRef.current) {
@@ -768,13 +796,17 @@
                     if (s0 || s1) {
                         const cur = latestStatus.current;
                         if (cur === 'PLAYING') {
-                            if (isOnlineRef.current && !isHostRef.current) {
-                                if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE_REQUEST' });
+                            if (isOnlineRef.current) {
+                                if (pausesLeftRef.current <= 0) return;
+                                setPausesLeft(p => p - 1);
+                                if (!isHostRef.current) {
+                                    if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE_REQUEST' });
+                                } else {
+                                    setStatus('PAUSED');
+                                    if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE' });
+                                }
                             } else {
                                 setStatus('PAUSED');
-                                if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
-                                    connRef.current.send({ type: 'PAUSE' });
-                                }
                             }
                         } else if (cur === 'PAUSED' && !isOnlineRef.current) {
                             setCountdown(3);
@@ -789,13 +821,18 @@
                 const triggerPause = () => {
                     if (latestStatus.current !== 'PLAYING') return;
                     minimizedByMeRef.current = true;
-                    if (isOnlineRef.current && !isHostRef.current) {
-                        if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE_REQUEST' });
+                    if (isOnlineRef.current) {
+                        if (pausesLeftRef.current > 0) {
+                            setPausesLeft(p => p - 1);
+                        }
+                        if (!isHostRef.current) {
+                            if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE_REQUEST' });
+                        } else {
+                            setStatus('PAUSED');
+                            if (connRef.current && connRef.current.open) connRef.current.send({ type: 'PAUSE' });
+                        }
                     } else {
                         setStatus('PAUSED');
-                        if (isOnlineRef.current && isHostRef.current && connRef.current && connRef.current.open) {
-                            connRef.current.send({ type: 'PAUSE' });
-                        }
                     }
                 };
                 const onFocus = () => { minimizedByMeRef.current = false; };
@@ -1079,11 +1116,23 @@
                                     } else {
                                         if (!engineRef.current['resetPending']) {
                                             engineRef.current['resetPending'] = true;
-                                            setTimeout(() => {
+                                            goalDoneReceivedRef.current = false;
+                                            const doReset = () => {
+                                                if (goalResetTimeoutRef.current) { clearTimeout(goalResetTimeoutRef.current); goalResetTimeoutRef.current = null; }
                                                 engine.resetPositions();
                                                 engineRef.current['resetPending'] = false;
-                                                setScore({...engine.state.score}); 
-                                            }, 1500);
+                                                setScore({...engine.state.score});
+                                            };
+                                            if (isOnlineRef.current) {
+                                                goalResetTimeoutRef.current = setTimeout(() => {
+                                                    if (goalDoneReceivedRef.current) { doReset(); }
+                                                    else {
+                                                        goalResetTimeoutRef.current = setTimeout(doReset, 1500);
+                                                    }
+                                                }, 1500);
+                                            } else {
+                                                goalResetTimeoutRef.current = setTimeout(doReset, 1500);
+                                            }
                                         }
                                     }
                                 }
@@ -1162,7 +1211,10 @@
                 setScore({ p1: 0, p2: 0 });
                 setTimeLeft(GAME_DURATION);
                 setWinner(null);
+                setRematchRequested(false);
+                setOpponentRematchRequested(false);
                 setMenuState('MAIN');
+                setPausesLeft(3);
                 
                 setCountdown(3);
                 setStatus('COUNTDOWN');
@@ -1209,9 +1261,19 @@
                         opponentLeaving = true;
                         return;
                     }
+                    if (data.type === 'REMATCH_REQUEST') {
+                        setOpponentRematchRequested(true);
+                        if (isHost && rematchRequestedRef.current) {
+                            conn.send({ type: 'START' });
+                            startGame(true, 'MEDIUM', true);
+                        }
+                        return;
+                    }
                     if (isHost) {
                         if (data.type === 'INPUT') {
                             clientInputRef.current = data.input;
+                        } else if (data.type === 'GOAL_DONE') {
+                            goalDoneReceivedRef.current = true;
                         } else if (data.type === 'PAUSE_REQUEST') {
                             if (latestStatus.current === 'PLAYING') {
                                 setStatus('PAUSED');
@@ -1240,7 +1302,15 @@
                         } else if (data.type === 'START') {
                             startGame(true, 'MEDIUM', true);
                         } else if (data.type === 'STATE') {
+                            const wasGoal = engineRef.current.state.isGoal;
                             engineRef.current.state = data.state;
+                            if (!wasGoal && data.state.isGoal && connRef.current && connRef.current.open) {
+                                setTimeout(() => {
+                                    if (connRef.current && connRef.current.open) {
+                                        connRef.current.send({ type: 'GOAL_DONE' });
+                                    }
+                                }, 1500);
+                            }
                             if (latestScore.current.p1 !== data.score.p1 || latestScore.current.p2 !== data.score.p2) {
                                 setScore(data.score);
                             }
@@ -1474,6 +1544,24 @@
                 setConnectionStatus('');
             };
 
+            const handleRematchClick = () => {
+                playUiSound();
+                if (!isOnlineRef.current) {
+                    restartGame();
+                    return;
+                }
+                setRematchRequested(true);
+                if (connRef.current && connRef.current.open) {
+                    connRef.current.send({ type: 'REMATCH_REQUEST' });
+                }
+                if (isHostRef.current && opponentRematchRequested) {
+                    if (connRef.current && connRef.current.open) {
+                        connRef.current.send({ type: 'START' });
+                    }
+                    startGame(isTwoPlayer, selectedDifficulty, true);
+                }
+            };
+
             const restartGame = () => {
                 if (isOnlineRef.current && isHostRef.current && connRef.current) {
                     connRef.current.send({ type: 'START' });
@@ -1690,7 +1778,7 @@
                                     maxLength={10}
                                     value={playerName}
                                     onChange={(e) => setPlayerName(e.target.value)}
-                                    className="bg-slate-800 text-white font-bold p-2 rounded-lg border border-purple-700 focus:border-purple-400 focus:outline-none text-center uppercase w-full text-sm"
+                                    className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-purple-700 focus:border-purple-400 focus:outline-none text-center uppercase w-full"
                                 />
                             </div>
                             <div className="text-center text-yellow-400 font-bold animate-pulse mt-2 text-xl">{connectionStatus}</div>
@@ -1708,7 +1796,7 @@
                                     maxLength={10}
                                     value={playerName}
                                     onChange={(e) => setPlayerName(e.target.value)}
-                                    className="bg-slate-800 text-white font-bold p-2 rounded-lg border border-green-700 focus:border-green-400 focus:outline-none text-center uppercase w-full text-sm"
+                                    className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-green-700 focus:border-green-400 focus:outline-none text-center uppercase w-full"
                                 />
                             </div>
                             <div className="bg-slate-800 p-4 rounded-lg text-center">
@@ -1730,7 +1818,7 @@
                                     maxLength={10}
                                     value={playerName}
                                     onChange={(e) => setPlayerName(e.target.value)}
-                                    className="bg-slate-800 text-white font-bold p-2 rounded-lg border border-blue-700 focus:border-blue-400 focus:outline-none text-center uppercase w-full text-sm"
+                                    className="bg-slate-800 text-white font-bold p-3 rounded-lg border border-blue-700 focus:border-blue-400 focus:outline-none text-center uppercase w-full"
                                 />
                             </div>
                             <input 
@@ -1762,11 +1850,16 @@
                     <div className={`absolute inset-0 bg-black/60 backdrop-blur-md flex flex-col items-center justify-center z-40 transition-opacity duration-300 ease-out ${isExiting ? 'opacity-0' : 'opacity-100'}`}>
                     <h2 className="text-6xl font-black text-white mb-4 tracking-widest">PAUSED</h2>
                     {isOnlineRef.current && pauseCountdown !== null && (
-                        <div className="text-7xl font-black text-yellow-400 italic tracking-tighter drop-shadow-[0_6px_8px_rgba(0,0,0,0.8)] animate-pulse mb-6">
+                        <div className="text-7xl font-black text-yellow-400 italic tracking-tighter drop-shadow-[0_6px_8px_rgba(0,0,0,0.8)] animate-pulse mb-4">
                             {pauseCountdown}
                         </div>
                     )}
-                    {(!isOnlineRef.current || pauseCountdown === null) && <div className="mb-8" />}
+                    {isOnlineRef.current && (
+                        <p className="text-slate-400 font-bold text-xs tracking-widest uppercase mb-6">
+                            {pausesLeft > 0 ? `${pausesLeft} pause${pausesLeft !== 1 ? 's' : ''} remaining` : 'No pauses remaining'}
+                        </p>
+                    )}
+                    {(!isOnlineRef.current || pauseCountdown === null) && !isOnlineRef.current && <div className="mb-8" />}
                     <div className="w-72 bg-slate-800/80 p-6 rounded-xl border border-slate-700 mb-8 flex flex-col items-center">
                         <label className="text-blue-300 font-bold text-sm tracking-widest mb-3 w-full flex justify-between">
                             <span>VOLUME</span><span>{volume}%</span>
@@ -1808,9 +1901,27 @@
                             <span className="text-7xl font-black text-white">{score.p2}</span>
                         </div>
                     </div>
-                    <div className="flex flex-col gap-5 w-72">
-                        {(!isOnlineRef.current || isHostRef.current) && (
-                            <button onClick={restartGame} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform hover:scale-105 transition border-b-4 border-yellow-800 text-xl">Rematch</button>
+                    <div className="flex flex-col gap-5 w-72 relative">
+                        {isOnlineRef.current ? (
+                            <button 
+                                onClick={handleRematchClick} 
+                                disabled={rematchRequested}
+                                className={`font-bold py-4 px-6 rounded-xl shadow-lg transform transition border-b-4 text-xl flex items-center justify-center gap-2
+                                    ${rematchRequested 
+                                        ? 'bg-slate-500 text-slate-300 border-slate-700 cursor-not-allowed' 
+                                        : 'bg-yellow-600 hover:bg-yellow-500 text-white hover:scale-105 border-yellow-800'}`}
+                            >
+                                {rematchRequested ? 'Waiting... 1/2' : 'Rematch'}
+                            </button>
+                        ) : (
+                            <button onClick={handleRematchClick} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform hover:scale-105 transition border-b-4 border-yellow-800 text-xl">Rematch</button>
+                        )}
+                        {isOnlineRef.current && opponentRematchRequested && !rematchRequested && (
+                            <div className="absolute -top-12 left-0 right-0 text-center animate-in slide-in-from-bottom-4 fade-in duration-300">
+                                <span className="bg-blue-600 text-white text-sm font-bold py-1 px-3 rounded-full shadow-lg border border-blue-400 animate-pulse">
+                                    Opponent wants a rematch!
+                                </span>
+                            </div>
                         )}
                         <button onClick={quitToMenu} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform hover:scale-105 transition border-b-4 border-slate-800 text-xl">Main Menu</button>
                     </div>
